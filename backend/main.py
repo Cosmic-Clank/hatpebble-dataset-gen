@@ -22,7 +22,12 @@ log = logging.getLogger("ems")
 
 MQTT_BROKER = "localhost"
 MQTT_PORT = 1883
-TOPICS = {"battery": "ems/battery", "ac": "ems/ac"}
+
+LOAD_GROUPS = ["load1", "load2", "load3"]
+
+TOPICS: dict[str, str] = {"battery": "ems/battery"}
+for lg in LOAD_GROUPS:
+    TOPICS[lg] = f"ems/ac/{lg}"
 
 # In-memory history buffer size (sent to new WebSocket clients on connect)
 HISTORY_SIZE = 120
@@ -32,17 +37,20 @@ LOG_DIR = Path(__file__).resolve().parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
 # CSV column order (must match the JSON keys from ESP32 / mock publisher)
-CSV_COLUMNS = {
-    "battery": [
-        "timestamp", "time", "battery_voltage", "battery_current",
-        "battery_power", "soc", "consumed_ah", "time_to_go",
-        "alarm_flags", "temperature",
-    ],
-    "ac": [
-        "timestamp", "date", "time", "ac_voltage", "ac_current",
-        "active_power", "active_energy", "frequency", "power_factor",
-    ],
-}
+BATTERY_COLUMNS = [
+    "timestamp", "time", "battery_voltage", "battery_current",
+    "battery_power", "soc", "consumed_ah", "time_to_go",
+    "alarm_flags", "temperature",
+]
+
+AC_COLUMNS = [
+    "timestamp", "date", "time", "ac_voltage", "ac_current",
+    "active_power", "active_energy", "frequency", "power_factor",
+]
+
+CSV_COLUMNS: dict[str, list[str]] = {"battery": BATTERY_COLUMNS}
+for lg in LOAD_GROUPS:
+    CSV_COLUMNS[lg] = AC_COLUMNS
 
 # ---------------------------------------------------------------------------
 # App
@@ -57,17 +65,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Shared state
-latest: dict[str, dict | None] = {"battery": None, "ac": None}
-last_seen: dict[str, str | None] = {"battery": None, "ac": None}
-history: dict[str, deque[dict]] = {
-    "battery": deque(maxlen=HISTORY_SIZE),
-    "ac": deque(maxlen=HISTORY_SIZE),
-}
+# Shared state — one entry per sensor key (battery, load1, load2, load3)
+ALL_KEYS = ["battery"] + LOAD_GROUPS
+
+latest: dict[str, dict | None] = {k: None for k in ALL_KEYS}
+last_seen: dict[str, str | None] = {k: None for k in ALL_KEYS}
+history: dict[str, deque[dict]] = {k: deque(maxlen=HISTORY_SIZE) for k in ALL_KEYS}
 mqtt_connected = False
 
 # Track open CSV file handles so we rotate daily
-_csv_writers: dict[str, tuple[str, csv.writer, object]] = {}  # key -> (date_str, writer, file_handle)
+_csv_writers: dict[str, tuple[str, csv.writer, object]] = {}
 
 # ---------------------------------------------------------------------------
 # CSV data logger
@@ -78,21 +85,17 @@ def _get_csv_writer(sensor: str) -> csv.writer:
     today = datetime.now().strftime("%Y-%m-%d")
     existing = _csv_writers.get(sensor)
 
-    # If we already have a writer for today, reuse it
     if existing and existing[0] == today:
         return existing[1]
 
-    # Close previous day's file if open
     if existing:
         existing[2].close()
 
-    # Create new file for today
     filepath = LOG_DIR / f"{sensor}_{today}.csv"
     is_new = not filepath.exists()
     fh = open(filepath, "a", newline="", encoding="utf-8")
     writer = csv.writer(fh)
 
-    # Write header if new file
     if is_new:
         writer.writerow(CSV_COLUMNS[sensor])
         log.info("Created log file: %s", filepath)
@@ -107,7 +110,6 @@ def log_reading(sensor: str, payload: dict, timestamp: str) -> None:
         writer = _get_csv_writer(sensor)
         row = [timestamp] + [payload.get(col) for col in CSV_COLUMNS[sensor][1:]]
         writer.writerow(row)
-        # Flush after every write so data isn't lost on crash
         _csv_writers[sensor][2].flush()
     except Exception as e:
         log.error("Failed to log %s reading: %s", sensor, e)
@@ -119,7 +121,7 @@ def log_reading(sensor: str, payload: dict, timestamp: str) -> None:
 def _load_today_history() -> None:
     """Pre-fill the in-memory history buffer from today's CSV logs."""
     today = datetime.now().strftime("%Y-%m-%d")
-    for sensor in ("battery", "ac"):
+    for sensor in ALL_KEYS:
         filepath = LOG_DIR / f"{sensor}_{today}.csv"
         if not filepath.exists():
             continue
@@ -127,9 +129,7 @@ def _load_today_history() -> None:
             with open(filepath, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 rows = list(reader)
-            # Take the last HISTORY_SIZE rows
             for row in rows[-HISTORY_SIZE:]:
-                # Reconstruct the JSON payload (exclude the timestamp column)
                 payload = {}
                 for col in CSV_COLUMNS[sensor][1:]:
                     val = row.get(col)
@@ -196,7 +196,6 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    # Close any open CSV file handles
     for sensor, (_, _, fh) in _csv_writers.items():
         try:
             fh.close()
@@ -210,15 +209,18 @@ async def shutdown():
 
 @app.get("/health")
 async def health():
-    return {
+    status = {
         "status": "ok",
         "mqtt_connected": mqtt_connected,
-        "battery_last_seen": last_seen["battery"],
-        "ac_last_seen": last_seen["ac"],
-        "battery_history_size": len(history["battery"]),
-        "ac_history_size": len(history["ac"]),
         "log_dir": str(LOG_DIR),
+        "sensors": {},
     }
+    for key in ALL_KEYS:
+        status["sensors"][key] = {
+            "last_seen": last_seen[key],
+            "history_size": len(history[key]),
+        }
+    return status
 
 
 @app.get("/logs")
@@ -240,11 +242,9 @@ async def list_logs():
 async def _stream(ws: WebSocket, key: str, interval: float = 0.5):
     await ws.accept()
     try:
-        # Send full history backlog so charts are pre-filled
         for item in history[key]:
             await ws.send_json(item)
 
-        # Then stream live updates
         last_sent = latest[key]
         while True:
             data = latest[key]
@@ -261,6 +261,16 @@ async def ws_battery(ws: WebSocket):
     await _stream(ws, "battery")
 
 
-@app.websocket("/ws/ac")
-async def ws_ac(ws: WebSocket):
-    await _stream(ws, "ac")
+@app.websocket("/ws/ac/load1")
+async def ws_ac_load1(ws: WebSocket):
+    await _stream(ws, "load1")
+
+
+@app.websocket("/ws/ac/load2")
+async def ws_ac_load2(ws: WebSocket):
+    await _stream(ws, "load2")
+
+
+@app.websocket("/ws/ac/load3")
+async def ws_ac_load3(ws: WebSocket):
+    await _stream(ws, "load3")

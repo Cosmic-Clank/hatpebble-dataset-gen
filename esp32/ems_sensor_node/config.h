@@ -10,14 +10,19 @@
 #define MQTT_PORT     1883
 #define MQTT_CLIENT   "esp32-ems-01"
 #define TOPIC_BATTERY "ems/battery"
-#define TOPIC_AC      "ems/ac"
+
+// 3 AC load groups — each maps to a separate PZEM-004T sensor
+// For a single ESP32 with one PZEM, set LOAD_GROUP to the one it monitors.
+// For multiple ESP32s, each gets a different LOAD_GROUP.
+#define LOAD_GROUP    "load1"
+#define TOPIC_AC      "ems/ac/" LOAD_GROUP
 
 // ---- PZEM-004T (Hardware Serial 2) ----
 #define PZEM_RX_PIN   16   // GPIO16 = RX for PZEM
 #define PZEM_TX_PIN   17   // GPIO17 = TX for PZEM
 
 // ---- Victron SmartShunt VE.Direct (Hardware Serial 1) ----
-#define VEDIRECT_RX_PIN  4   // GPIO4 = RX (SmartShunt TX → ESP32 RX)
+#define VEDIRECT_RX_PIN  4   // GPIO4 = RX (SmartShunt TX -> ESP32 RX)
 #define VEDIRECT_BAUD    19200
 
 // ---- Timing ----

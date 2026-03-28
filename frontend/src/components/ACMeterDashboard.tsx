@@ -20,8 +20,13 @@ interface ACPayload {
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://localhost:8000";
 
-export default function ACMeterDashboard() {
-  const { data, history, connected } = useWebSocket<ACPayload>(`${WS_URL}/ws/ac`);
+interface Props {
+  loadGroup: string;  // "load1" | "load2" | "load3"
+  label: string;      // Display name
+}
+
+export default function ACMeterDashboard({ loadGroup, label }: Props) {
+  const { data, history, connected } = useWebSocket<ACPayload>(`${WS_URL}/ws/ac/${loadGroup}`);
 
   const chartData = history.map((d, i) => ({
     idx: i,
@@ -43,9 +48,9 @@ export default function ACMeterDashboard() {
             </svg>
           </div>
           <div>
-            <h2 className="text-lg font-bold">PZEM-004T AC Multimeter</h2>
+            <h2 className="text-lg font-bold">{label}</h2>
             <p className="text-xs text-muted">
-              Phase 1 &middot; {data?.date ?? "—"} {data?.time ?? ""} &middot; Streaming at 1 Hz
+              PZEM-004T &middot; {data?.date ?? "—"} {data?.time ?? ""} &middot; Streaming at 1 Hz
             </p>
           </div>
         </div>

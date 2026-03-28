@@ -5,8 +5,8 @@ Usage:
     pip install paho-mqtt
     python mock_publisher.py
 
-Publishes fake battery and AC data to the Mosquitto broker on localhost:1883.
-Run this to test the full pipeline (MQTT → FastAPI → WebSocket → Dashboard)
+Publishes fake battery and 3 AC load group data to the Mosquitto broker.
+Run this to test the full pipeline (MQTT -> FastAPI -> WebSocket -> Dashboard)
 without any ESP32 hardware.
 """
 
@@ -17,19 +17,29 @@ import time
 
 import paho.mqtt.client as mqtt
 
-BROKER = "localhost"
+BROKER = "192.168.70.16"
 PORT = 1883
 INTERVAL = 0.5  # seconds between publishes
+
+# Load group profiles — different base loads to make the data distinguishable
+LOAD_PROFILES = {
+    "load1": {"name": "Main Circuit",  "base_current": 10, "base_pf": 0.95},
+    "load2": {"name": "HVAC System",   "base_current": 6,  "base_pf": 0.88},
+    "load3": {"name": "Water Heater",  "base_current": 14, "base_pf": 0.99},
+}
 
 client = mqtt.Client()
 client.connect(BROKER, PORT)
 client.loop_start()
 
 print(f"Publishing fake sensor data to {BROKER}:{PORT} every {INTERVAL}s …")
+print(f"  Battery: ems/battery")
+for lg in LOAD_PROFILES:
+    print(f"  {LOAD_PROFILES[lg]['name']}: ems/ac/{lg}")
 print("Press Ctrl+C to stop.\n")
 
 t = 0.0
-energy_acc = 0.0
+energy_acc = {lg: 0.0 for lg in LOAD_PROFILES}
 
 try:
     while True:
@@ -54,29 +64,40 @@ try:
 
         client.publish("ems/battery", json.dumps(battery_msg))
 
-        # --- AC meter (simulated household load) ---
-        ac_voltage = 230 + 10 * math.sin(t / 45) + random.uniform(-2, 2)
-        ac_current = 8 + 4 * math.sin(t / 20) + random.uniform(-0.5, 0.5)
-        active_power = ac_voltage * ac_current * 0.95
-        energy_acc += active_power * INTERVAL / 3_600_000  # kWh
-        frequency = 50.0 + random.uniform(-0.05, 0.05)
-        pf = 0.92 + 0.06 * math.sin(t / 40) + random.uniform(-0.01, 0.01)
-
+        # --- 3 AC load groups (each simulates a separate PZEM-004T) ---
         now = time.localtime()
-        ac_msg = {
-            "date": time.strftime("%Y-%m-%d", now),
-            "time": time.strftime("%H:%M:%S", now),
-            "ac_voltage": round(ac_voltage, 1),
-            "ac_current": round(ac_current, 2),
-            "active_power": round(active_power, 1),
-            "active_energy": round(energy_acc, 6),
-            "frequency": round(frequency, 2),
-            "power_factor": round(min(1.0, max(0, pf)), 2),
-        }
+        status_parts = []
 
-        client.publish("ems/ac", json.dumps(ac_msg))
+        for lg, profile in LOAD_PROFILES.items():
+            # Each load has a different base current and phase offset
+            phase_offset = hash(lg) % 60
+            ac_voltage = 230 + 10 * math.sin(t / 45) + random.uniform(-2, 2)
+            ac_current = (
+                profile["base_current"]
+                + (profile["base_current"] * 0.3) * math.sin((t + phase_offset) / 20)
+                + random.uniform(-0.3, 0.3)
+            )
+            pf = profile["base_pf"] + 0.03 * math.sin(t / 40) + random.uniform(-0.01, 0.01)
+            pf = min(1.0, max(0, pf))
+            active_power = ac_voltage * ac_current * pf
+            energy_acc[lg] += active_power * INTERVAL / 3_600_000  # kWh
+            frequency = 50.0 + random.uniform(-0.05, 0.05)
 
-        print(f"[t={t:6.1f}] battery={voltage:.2f}V {current:+.2f}A | ac={ac_voltage:.0f}V {active_power:.0f}W")
+            ac_msg = {
+                "date": time.strftime("%Y-%m-%d", now),
+                "time": time.strftime("%H:%M:%S", now),
+                "ac_voltage": round(ac_voltage, 1),
+                "ac_current": round(ac_current, 2),
+                "active_power": round(active_power, 1),
+                "active_energy": round(energy_acc[lg], 6),
+                "frequency": round(frequency, 2),
+                "power_factor": round(pf, 2),
+            }
+
+            client.publish(f"ems/ac/{lg}", json.dumps(ac_msg))
+            status_parts.append(f"{lg}={active_power:.0f}W")
+
+        print(f"[t={t:6.1f}] bat={voltage:.2f}V {current:+.2f}A | {' | '.join(status_parts)}")
 
         t += INTERVAL
         time.sleep(INTERVAL)
