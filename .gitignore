@@ -1,0 +1,10 @@
+# Backend sensor logs (runtime data, not source code)
+*.csv
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Environment
+.env*
