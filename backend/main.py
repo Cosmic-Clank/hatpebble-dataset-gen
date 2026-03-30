@@ -10,7 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import aiomqtt
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +72,21 @@ latest: dict[str, dict | None] = {k: None for k in ALL_KEYS}
 last_seen: dict[str, str | None] = {k: None for k in ALL_KEYS}
 history: dict[str, deque[dict]] = {k: deque(maxlen=HISTORY_SIZE) for k in ALL_KEYS}
 mqtt_connected = False
+
+# Shared MQTT client reference — set while the listener is connected
+_mqtt_client: aiomqtt.Client | None = None
+
+# Last-known control state per load group (kept in memory)
+control_state: dict[str, dict] = {
+    lg: {
+        "relay":    "OFF",
+        "threshold": None,
+        "on_time":   None,
+        "off_time":  None,
+        "priority":  "Normal",
+    }
+    for lg in LOAD_GROUPS
+}
 
 # Track open CSV file handles so we rotate daily
 _csv_writers: dict[str, tuple[str, csv.writer, object]] = {}
@@ -150,10 +165,11 @@ def _load_today_history() -> None:
 # ---------------------------------------------------------------------------
 
 async def mqtt_listener():
-    global mqtt_connected
+    global mqtt_connected, _mqtt_client
     while True:
         try:
             async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as client:
+                _mqtt_client = client
                 mqtt_connected = True
                 log.info("Connected to MQTT broker at %s:%s", MQTT_BROKER, MQTT_PORT)
                 await client.subscribe("ems/#")
@@ -221,6 +237,30 @@ async def health():
             "history_size": len(history[key]),
         }
     return status
+
+
+@app.get("/control/{load_group}")
+async def get_control(load_group: str):
+    if load_group not in LOAD_GROUPS:
+        raise HTTPException(status_code=404, detail=f"Unknown load group: {load_group}")
+    return control_state[load_group]
+
+
+@app.post("/control/{load_group}")
+async def send_control(load_group: str, request: Request):
+    if load_group not in LOAD_GROUPS:
+        raise HTTPException(status_code=404, detail=f"Unknown load group: {load_group}")
+    if _mqtt_client is None:
+        raise HTTPException(status_code=503, detail="MQTT broker not connected")
+
+    body = await request.json()
+    topic = f"ems/control/{load_group}"
+    await _mqtt_client.publish(topic, json.dumps(body))
+
+    # Update in-memory state
+    control_state[load_group].update(body)
+    log.info("Control command sent to %s: %s", topic, body)
+    return {"ok": True, "state": control_state[load_group]}
 
 
 @app.get("/logs")
