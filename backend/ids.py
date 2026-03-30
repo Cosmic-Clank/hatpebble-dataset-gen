@@ -153,28 +153,32 @@ class MQTTFloodRule(Rule):
     def __init__(self, limit: int = 60, window: float = 5.0):
         self.limit = limit
         self.window = window
-        self._timestamps: deque[float] = deque()
-        self._alerted = False  # suppress repeated alerts for the same burst
+        self._timestamps: dict[str, deque[float]] = {}
+        self._alerted: dict[str, bool] = {}
 
     def evaluate(self, topic, payload, history):
-        now = time.monotonic()
-        self._timestamps.append(now)
-        # Evict timestamps outside the window
-        while self._timestamps and self._timestamps[0] < now - self.window:
-            self._timestamps.popleft()
+        if topic not in self._timestamps:
+            self._timestamps[topic] = deque()
+            self._alerted[topic] = False
 
-        count = len(self._timestamps)
+        now = time.monotonic()
+        self._timestamps[topic].append(now)
+        # Evict timestamps outside the window for this topic
+        while self._timestamps[topic] and self._timestamps[topic][0] < now - self.window:
+            self._timestamps[topic].popleft()
+
+        count = len(self._timestamps[topic])
         if count > self.limit:
-            if not self._alerted:
-                self._alerted = True
+            if not self._alerted[topic]:
+                self._alerted[topic] = True
                 return self._alert(
                     topic,
-                    f"MQTT flood detected: {count} packets in {self.window}s "
+                    f"MQTT flood detected on {topic}: {count} packets in {self.window}s "
                     f"(limit {self.limit})",
-                    {"packet_count": count, "window_seconds": self.window},
+                    {"packet_count": count, "window_seconds": self.window, "topic": topic},
                 )
         else:
-            self._alerted = False  # reset so next burst fires again
+            self._alerted[topic] = False  # reset so next burst on this topic fires again
         return None
 
 
