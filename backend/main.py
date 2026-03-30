@@ -239,6 +239,7 @@ async def mqtt_listener():
 @app.on_event("startup")
 async def startup():
     _load_today_history()
+    ids_engine.load_today_alerts()
     asyncio.create_task(mqtt_listener())
     log.info("MQTT listener started")
 

@@ -9,6 +9,7 @@ Add new rules by:
 
 from __future__ import annotations
 
+import csv
 import math
 import statistics
 import time
@@ -16,7 +17,81 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
+
+# ---------------------------------------------------------------------------
+# Alert log — one JSON-lines CSV per day, same directory as sensor logs
+# ---------------------------------------------------------------------------
+
+_LOG_DIR = Path(__file__).resolve().parent / "logs"
+_LOG_DIR.mkdir(exist_ok=True)
+
+_ALERT_COLUMNS = ["timestamp", "id", "rule", "severity", "topic", "message", "data"]
+
+# (date_str, csv.writer, file_handle)
+_alert_writer: tuple[str, csv.writer, object] | None = None
+
+
+def _get_alert_writer() -> csv.writer:
+    global _alert_writer
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    if _alert_writer and _alert_writer[0] == today:
+        return _alert_writer[1]
+
+    if _alert_writer:
+        _alert_writer[2].close()  # type: ignore[union-attr]
+
+    filepath = _LOG_DIR / f"alerts_{today}.csv"
+    is_new = not filepath.exists()
+    fh = open(filepath, "a", newline="", encoding="utf-8")
+    writer = csv.writer(fh)
+    if is_new:
+        writer.writerow(_ALERT_COLUMNS)
+    _alert_writer = (today, writer, fh)
+    return writer
+
+
+def _log_alert(alert: "Alert") -> None:
+    try:
+        writer = _get_alert_writer()
+        writer.writerow([
+            alert.timestamp,
+            alert.id,
+            alert.rule,
+            alert.severity,
+            alert.topic,
+            alert.message,
+            alert.data,
+        ])
+        _alert_writer[2].flush()  # type: ignore[index]
+    except Exception:
+        pass  # logging must never crash the IDS
+
+
+def load_today_alerts() -> None:
+    """Pre-fill the in-memory alert deque from today's log on backend startup."""
+    today = datetime.now().strftime("%Y-%m-%d")
+    filepath = _LOG_DIR / f"alerts_{today}.csv"
+    if not filepath.exists():
+        return
+    try:
+        with open(filepath, "r", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            rows = list(reader)
+        for row in rows[-200:]:
+            alerts.append(Alert(
+                id=row.get("id", ""),
+                timestamp=row.get("timestamp", ""),
+                rule=row.get("rule", ""),
+                severity=row.get("severity", "info"),
+                topic=row.get("topic", ""),
+                message=row.get("message", ""),
+                data={},
+            ))
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # Alert
@@ -323,13 +398,14 @@ def evaluate_all(
     payload: dict[str, Any],
     history: list[dict[str, Any]],
 ) -> list[Alert]:
-    """Run all rules. Append triggered alerts to the global store and return them."""
+    """Run all rules. Append triggered alerts to the global store, log them, and return them."""
     triggered: list[Alert] = []
     for rule in RULES:
         try:
             alert = rule.evaluate(topic, payload, history)
             if alert:
                 alerts.append(alert)
+                _log_alert(alert)
                 triggered.append(alert)
         except Exception:
             # A buggy rule must never crash the backend
