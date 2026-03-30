@@ -38,7 +38,19 @@ schedule:       dict[str, dict]       = {lg: {"on_time": None, "off_time": None}
 priority:       dict[str, str]        = {lg: "Normal" for lg in LOAD_PROFILES}
 
 
-def on_message(client, userdata, msg):
+def publish_status(mqtt_client, load_group: str) -> None:
+    """Publish the current state for a load group to ems/status/{load_group}."""
+    state = {
+        "relay":     relay_state[load_group],
+        "threshold": power_threshold[load_group],
+        "on_time":   schedule[load_group]["on_time"],
+        "off_time":  schedule[load_group]["off_time"],
+        "priority":  priority[load_group],
+    }
+    mqtt_client.publish(f"ems/status/{load_group}", json.dumps(state), retain=True)
+
+
+def on_message(mqtt_client, userdata, msg):
     topic = msg.topic          # e.g. "ems/control/load1"
     load_group = topic.split("/")[-1]
     ts = time.strftime("%H:%M:%S")
@@ -70,6 +82,9 @@ def on_message(client, userdata, msg):
     if "priority" in payload:
         priority[load_group] = str(payload["priority"])
 
+    # --- Report new state back so backend stays in sync ---
+    publish_status(mqtt_client, load_group)
+
     # --- Pretty-print ---
     fields = " | ".join(f"{k}: {v}" for k, v in payload.items())
     relay_icon = "🟢" if relay_state[load_group] == "ON" else "🔴"
@@ -92,8 +107,13 @@ client.connect(BROKER, PORT)
 client.subscribe("ems/control/#")
 client.loop_start()
 
+# Announce initial state so backend control_state is populated immediately
+for lg in LOAD_PROFILES:
+    publish_status(client, lg)
+
 print(f"[mock-esp] Connected to {BROKER}:{PORT}")
 print(f"  Publishing  → ems/battery, ems/ac/load1, ems/ac/load2, ems/ac/load3")
+print(f"  Status      → ems/status/load1, ems/status/load2, ems/status/load3")
 print(f"  Listening   ← ems/control/#")
 print("Press Ctrl+C to stop.\n")
 
@@ -164,6 +184,7 @@ try:
             thr = power_threshold[lg]
             if thr is not None and active_power > thr:
                 relay_state[lg] = "OFF"
+                publish_status(client, lg)
                 print(f"\n[TRIP] {lg} tripped! {active_power:.0f}W > threshold {thr:.0f}W → relay OFF\n")
 
             ac_msg = {

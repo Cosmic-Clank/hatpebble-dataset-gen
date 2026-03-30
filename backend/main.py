@@ -29,6 +29,8 @@ TOPICS: dict[str, str] = {"battery": "ems/battery"}
 for lg in LOAD_GROUPS:
     TOPICS[lg] = f"ems/ac/{lg}"
 
+STATUS_TOPICS: dict[str, str] = {lg: f"ems/status/{lg}" for lg in LOAD_GROUPS}
+
 # In-memory history buffer size (sent to new WebSocket clients on connect)
 HISTORY_SIZE = 120
 
@@ -76,14 +78,15 @@ mqtt_connected = False
 # Shared MQTT client reference — set while the listener is connected
 _mqtt_client: aiomqtt.Client | None = None
 
-# Last-known control state per load group (kept in memory)
+# Control state — populated from ems/status/{lg} published by the ESP on startup.
+# Until the ESP reports in, we have no state (None signals "unknown").
 control_state: dict[str, dict] = {
     lg: {
-        "relay":    "OFF",
+        "relay":     None,
         "threshold": None,
         "on_time":   None,
         "off_time":  None,
-        "priority":  "Normal",
+        "priority":  None,
     }
     for lg in LOAD_GROUPS
 }
@@ -183,15 +186,25 @@ async def mqtt_listener():
 
                     now = datetime.now(timezone.utc).isoformat()
 
-                    for sensor, sensor_topic in TOPICS.items():
-                        if topic == sensor_topic:
-                            latest[sensor] = payload
-                            last_seen[sensor] = now
-                            history[sensor].append(payload)
-                            log_reading(sensor, payload, now)
+                    # ems/status/{lg} — ESP reports its own state
+                    matched_status = False
+                    for lg, status_topic in STATUS_TOPICS.items():
+                        if topic == status_topic:
+                            control_state[lg].update(payload)
+                            log.info("Status update from ESP for %s: %s", lg, payload)
+                            matched_status = True
                             break
-                    else:
-                        log.debug("Unknown topic: %s", topic)
+
+                    if not matched_status:
+                        for sensor, sensor_topic in TOPICS.items():
+                            if topic == sensor_topic:
+                                latest[sensor] = payload
+                                last_seen[sensor] = now
+                                history[sensor].append(payload)
+                                log_reading(sensor, payload, now)
+                                break
+                        else:
+                            log.debug("Unknown topic: %s", topic)
 
         except aiomqtt.MqttError as e:
             mqtt_connected = False
