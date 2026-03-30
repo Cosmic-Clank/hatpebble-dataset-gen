@@ -9,7 +9,10 @@ from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 
+import dataclasses
+
 import aiomqtt
+import ids as ids_engine
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -90,6 +93,15 @@ control_state: dict[str, dict] = {
     }
     for lg in LOAD_GROUPS
 }
+
+# Per-client queues for pushing alerts over WebSocket
+_alert_queues: list[asyncio.Queue] = []
+
+
+async def _dispatch_alert(alert: ids_engine.Alert) -> None:
+    for q in _alert_queues:
+        await q.put(alert)
+
 
 # Track open CSV file handles so we rotate daily
 _csv_writers: dict[str, tuple[str, csv.writer, object]] = {}
@@ -187,6 +199,7 @@ async def mqtt_listener():
                     now = datetime.now(timezone.utc).isoformat()
 
                     # ems/status/{lg} — ESP reports its own state
+                    matched_sensor: str | None = None
                     matched_status = False
                     for lg, status_topic in STATUS_TOPICS.items():
                         if topic == status_topic:
@@ -202,9 +215,16 @@ async def mqtt_listener():
                                 last_seen[sensor] = now
                                 history[sensor].append(payload)
                                 log_reading(sensor, payload, now)
+                                matched_sensor = sensor
                                 break
-                        else:
+                        if matched_sensor is None:
                             log.debug("Unknown topic: %s", topic)
+
+                    # Run IDS rules against every message (known or unknown topic)
+                    sensor_history = list(history.get(matched_sensor or "", []))
+                    triggered = ids_engine.evaluate_all(topic, payload, sensor_history)
+                    for alert in triggered:
+                        asyncio.create_task(_dispatch_alert(alert))
 
         except aiomqtt.MqttError as e:
             mqtt_connected = False
@@ -250,6 +270,32 @@ async def health():
             "history_size": len(history[key]),
         }
     return status
+
+
+@app.get("/alerts")
+async def get_alerts():
+    """Return all in-memory alerts (newest last)."""
+    return [dataclasses.asdict(a) for a in ids_engine.alerts]
+
+
+@app.websocket("/ws/alerts")
+async def ws_alerts(ws: WebSocket):
+    await ws.accept()
+    q: asyncio.Queue = asyncio.Queue()
+    _alert_queues.append(q)
+    try:
+        # Send existing alert history on connect
+        for a in ids_engine.alerts:
+            await ws.send_json(dataclasses.asdict(a))
+        # Stream new alerts as they arrive
+        while True:
+            alert = await q.get()
+            await ws.send_json(dataclasses.asdict(alert))
+    except (WebSocketDisconnect, Exception):
+        pass
+    finally:
+        if q in _alert_queues:
+            _alert_queues.remove(q)
 
 
 @app.get("/control/{load_group}")
