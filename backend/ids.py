@@ -27,7 +27,8 @@ from typing import Any
 _LOG_DIR = Path(__file__).resolve().parent / "logs"
 _LOG_DIR.mkdir(exist_ok=True)
 
-_ALERT_COLUMNS = ["timestamp", "id", "rule", "severity", "topic", "message", "data"]
+_ALERT_COLUMNS = ["timestamp", "id", "rule",
+                  "severity", "topic", "message", "data"]
 
 # (date_str, csv.writer, file_handle)
 _alert_writer: tuple[str, csv.writer, object] | None = None
@@ -81,10 +82,12 @@ def load_today_alerts() -> None:
             reader = csv.DictReader(f)
             rows = list(reader)
         for row in rows[-200:]:
+            rule = row.get("rule", "")
             alerts.append(Alert(
                 id=row.get("id", ""),
                 timestamp=row.get("timestamp", ""),
-                rule=row.get("rule", ""),
+                rule=rule,
+                label=rule.replace("_", " ").title(),
                 severity=row.get("severity", "info"),
                 topic=row.get("topic", ""),
                 message=row.get("message", ""),
@@ -97,11 +100,13 @@ def load_today_alerts() -> None:
 # Alert
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class Alert:
     id: str
     timestamp: str          # ISO 8601 UTC
-    rule: str               # rule name key
+    rule: str               # snake_case key (e.g. "mqtt_flood")
+    label: str              # human-readable name (e.g. "Mqtt Flood")
     severity: str           # "info" | "warning" | "critical"
     topic: str              # MQTT topic that triggered it
     message: str            # human-readable description
@@ -115,8 +120,11 @@ alerts: deque[Alert] = deque(maxlen=200)
 # Rule base class
 # ---------------------------------------------------------------------------
 
+
 class Rule:
     name: str = "base"
+    # override for custom display name; auto-generated from name if None
+    label: str | None = None
     severity: str = "info"
 
     def evaluate(
@@ -132,6 +140,8 @@ class Rule:
             id=str(uuid.uuid4()),
             timestamp=datetime.now(timezone.utc).isoformat(),
             rule=self.name,
+            label=self.label if self.label is not None else self.name.replace(
+                "_", " ").title(),
             severity=self.severity,
             topic=topic,
             message=message,
@@ -144,10 +154,12 @@ class Rule:
 # Counts ALL topics together, not per-topic.
 # ---------------------------------------------------------------------------
 
+
 class MQTTFloodRule(Rule):
     """Alert if more than `limit` MQTT messages arrive within `window` seconds."""
 
     name = "mqtt_flood"
+    label = "MQTT Flood"
     severity = "warning"
 
     def __init__(self, limit: int = 60, window: float = 5.0):
@@ -175,10 +187,12 @@ class MQTTFloodRule(Rule):
                     topic,
                     f"MQTT flood detected on {topic}: {count} packets in {self.window}s "
                     f"(limit {self.limit})",
-                    {"packet_count": count, "window_seconds": self.window, "topic": topic},
+                    {"packet_count": count,
+                        "window_seconds": self.window, "topic": topic},
                 )
         else:
-            self._alerted[topic] = False  # reset so next burst on this topic fires again
+            # reset so next burst on this topic fires again
+            self._alerted[topic] = False
         return None
 
 
@@ -193,6 +207,7 @@ KNOWN_PREFIXES = (
     "ems/status/",
     "ems/control/",
 )
+
 
 class UnknownTopicRule(Rule):
     """Alert on messages from unexpected MQTT topics."""
@@ -219,6 +234,7 @@ class VoltageAnomalyRule(Rule):
     """Alert when voltage goes outside expected bounds."""
 
     name = "voltage_anomaly"
+    label = "Voltage Anomaly"
     severity = "critical"
 
     BATTERY_MIN = 10.0
@@ -262,6 +278,7 @@ REQUIRED_FIELDS: dict[str, set[str]] = {
     "ems/battery": {"battery_voltage", "battery_current", "battery_power"},
 }
 AC_REQUIRED = {"ac_voltage", "ac_current", "active_power", "frequency"}
+
 
 class MalformedPayloadRule(Rule):
     """Alert when a known payload is missing required fields."""
@@ -316,7 +333,7 @@ class PowerSpikeRule(Rule):
 
         recent = [
             r["active_power"]
-            for r in history[-self.window :]
+            for r in history[-self.window:]
             if r.get("active_power") is not None
         ]
 
@@ -335,7 +352,8 @@ class PowerSpikeRule(Rule):
                 topic,
                 f"Power spike: {power:.0f} W is {z:.1f}σ from recent mean "
                 f"({mean:.0f} W ± {stdev:.0f} W)",
-                {"power": power, "mean": round(mean, 1), "stdev": round(stdev, 1), "z_score": round(z, 2)},
+                {"power": power, "mean": round(mean, 1), "stdev": round(
+                    stdev, 1), "z_score": round(z, 2)},
             )
         return None
 
@@ -361,7 +379,7 @@ class VoltageTrendRule(Rule):
 
         voltages = [
             r["battery_voltage"]
-            for r in history[-(self.window + 1) :]
+            for r in history[-(self.window + 1):]
             if r.get("battery_voltage") is not None
         ]
 
@@ -375,7 +393,8 @@ class VoltageTrendRule(Rule):
                 topic,
                 f"Battery voltage declining for {self.window} consecutive readings "
                 f"({voltages[0]:.2f} V → {voltages[-1]:.2f} V, −{drop:.2f} V)",
-                {"start_v": round(voltages[0], 3), "end_v": round(voltages[-1], 3), "drop": round(drop, 3)},
+                {"start_v": round(voltages[0], 3), "end_v": round(
+                    voltages[-1], 3), "drop": round(drop, 3)},
             )
         return None
 
@@ -396,6 +415,7 @@ RULES: list[Rule] = [
 # ---------------------------------------------------------------------------
 # Evaluation entry point — called by main.py for every MQTT message
 # ---------------------------------------------------------------------------
+
 
 def evaluate_all(
     topic: str,
