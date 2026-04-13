@@ -21,7 +21,7 @@ import time
 
 import paho.mqtt.client as mqtt
 
-BROKER = "192.168.70.16"
+BROKER = "192.168.1.130"
 PORT = 1883
 INTERVAL = 0.5  # seconds between publishes
 
@@ -32,10 +32,11 @@ LOAD_PROFILES = {
 }
 
 # Per-load-group state (mutated by on_message from the MQTT subscriber thread)
-relay_state:    dict[str, str]        = {lg: "ON"   for lg in LOAD_PROFILES}
+relay_state:    dict[str, str] = {lg: "ON" for lg in LOAD_PROFILES}
 power_threshold: dict[str, float | None] = {lg: None for lg in LOAD_PROFILES}
-schedule:       dict[str, dict]       = {lg: {"on_time": None, "off_time": None} for lg in LOAD_PROFILES}
-priority:       dict[str, str]        = {lg: "Normal" for lg in LOAD_PROFILES}
+schedule:       dict[str, dict] = {
+    lg: {"on_time": None, "off_time": None} for lg in LOAD_PROFILES}
+priority:       dict[str, str] = {lg: "Normal" for lg in LOAD_PROFILES}
 
 
 def publish_status(mqtt_client, load_group: str) -> None:
@@ -47,7 +48,8 @@ def publish_status(mqtt_client, load_group: str) -> None:
         "off_time":  schedule[load_group]["off_time"],
         "priority":  priority[load_group],
     }
-    mqtt_client.publish(f"ems/status/{load_group}", json.dumps(state), retain=True)
+    mqtt_client.publish(
+        f"ems/status/{load_group}", json.dumps(state), retain=True)
 
 
 def on_message(mqtt_client, userdata, msg):
@@ -62,7 +64,8 @@ def on_message(mqtt_client, userdata, msg):
         payload = json.loads(msg.payload.decode())
     except (json.JSONDecodeError, UnicodeDecodeError):
         raw = msg.payload.decode(errors="replace")
-        print(f"\n[CONTROL] {ts} → {load_group.upper()} | BAD PAYLOAD: {raw}\n")
+        print(
+            f"\n[CONTROL] {ts} → {load_group.upper()} | BAD PAYLOAD: {raw}\n")
         return
 
     # --- Apply state changes ---
@@ -71,7 +74,8 @@ def on_message(mqtt_client, userdata, msg):
 
     if "threshold" in payload:
         val = payload["threshold"]
-        power_threshold[load_group] = float(val) if val not in (None, "", 0, "0") else None
+        power_threshold[load_group] = float(
+            val) if val not in (None, "", 0, "0") else None
 
     if "on_time" in payload:
         schedule[load_group]["on_time"] = payload["on_time"] or None
@@ -93,7 +97,8 @@ def on_message(mqtt_client, userdata, msg):
     print(f"\n{'='*55}")
     print(f"  [CONTROL] {ts}  →  {load_group.upper()}")
     print(f"  command : {fields}")
-    print(f"  state   : relay={relay_icon}{relay_state[load_group]}  threshold={thr}  priority={priority[load_group]}")
+    print(
+        f"  state   : relay={relay_icon}{relay_state[load_group]}  threshold={thr}  priority={priority[load_group]}")
     print(f"{'='*55}\n")
 
 
@@ -127,11 +132,11 @@ energy_acc = {lg: 0.0 for lg in LOAD_PROFILES}
 try:
     while True:
         # --- Battery ---
-        voltage     = 12.8 + 0.3 * math.sin(t / 60)  + random.uniform(-0.05, 0.05)
-        current     = -3.0 + 1.5 * math.sin(t / 30)  + random.uniform(-0.2,  0.2)
-        power       = voltage * current
-        soc         = max(0, min(100, 85 + 15 * math.sin(t / 120)))
-        temperature = 25   + 3   * math.sin(t / 90)  + random.uniform(-0.5,  0.5)
+        voltage = 12.8 + 0.3 * math.sin(t / 60) + random.uniform(-0.05, 0.05)
+        current = -3.0 + 1.5 * math.sin(t / 30) + random.uniform(-0.2,  0.2)
+        power = voltage * current
+        soc = max(0, min(100, 85 + 15 * math.sin(t / 120)))
+        temperature = 25 + 3 * math.sin(t / 90) + random.uniform(-0.5,  0.5)
 
         battery_msg = {
             "time":            round(t, 1),
@@ -168,24 +173,27 @@ try:
                 continue
 
             phase_offset = hash(lg) % 60
-            ac_voltage   = 230 + 10  * math.sin(t / 45) + random.uniform(-2, 2)
-            ac_current   = (
+            ac_voltage = 230 + 10 * math.sin(t / 45) + random.uniform(-2, 2)
+            ac_current = (
                 profile["base_current"]
-                + (profile["base_current"] * 0.3) * math.sin((t + phase_offset) / 20)
+                + (profile["base_current"] * 0.3) *
+                math.sin((t + phase_offset) / 20)
                 + random.uniform(-0.3, 0.3)
             )
-            pf           = profile["base_pf"] + 0.03 * math.sin(t / 40) + random.uniform(-0.01, 0.01)
-            pf           = min(1.0, max(0.0, pf))
+            pf = profile["base_pf"] + 0.03 * \
+                math.sin(t / 40) + random.uniform(-0.01, 0.01)
+            pf = min(1.0, max(0.0, pf))
             active_power = ac_voltage * ac_current * pf
             energy_acc[lg] += active_power * INTERVAL / 3_600_000  # kWh
-            frequency    = 50.0 + random.uniform(-0.05, 0.05)
+            frequency = 50.0 + random.uniform(-0.05, 0.05)
 
             # Auto-trip if threshold exceeded
             thr = power_threshold[lg]
             if thr is not None and active_power > thr:
                 relay_state[lg] = "OFF"
                 publish_status(client, lg)
-                print(f"\n[TRIP] {lg} tripped! {active_power:.0f}W > threshold {thr:.0f}W → relay OFF\n")
+                print(
+                    f"\n[TRIP] {lg} tripped! {active_power:.0f}W > threshold {thr:.0f}W → relay OFF\n")
 
             ac_msg = {
                 "date":          time.strftime("%Y-%m-%d", now),
@@ -203,7 +211,8 @@ try:
         relay_icons = "".join(
             ("🟢" if relay_state[lg] == "ON" else "🔴") for lg in LOAD_PROFILES
         )
-        print(f"[t={t:6.1f}] bat={voltage:.2f}V {current:+.2f}A  {relay_icons}  {' | '.join(status_parts)}")
+        print(
+            f"[t={t:6.1f}] bat={voltage:.2f}V {current:+.2f}A  {relay_icons}  {' | '.join(status_parts)}")
 
         t += INTERVAL
         time.sleep(INTERVAL)

