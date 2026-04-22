@@ -153,6 +153,7 @@ def reload_models() -> None:
 
 async def run_forever() -> None:
     """Asyncio task: load models once, then process new buckets every cycle."""
+    print("NOW ITS HERE")
     reload_models()
     while True:
         await asyncio.sleep(INFERENCE_INTERVAL_SECONDS)
