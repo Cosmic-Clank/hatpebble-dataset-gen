@@ -1,13 +1,13 @@
 """
-SARIMA inference service — runs as an asyncio background task in FastAPI.
+XGBoost inference service — runs as an asyncio background task in FastAPI.
 
 Lifecycle:
   1. reload_models() called once at startup (and again on POST /api/forecasting/reload)
-     - Loads pickles via state.load_all()
-     - Silently backfills model state from train_end → now (no anomaly detection)
-     - Primes each model's first forecast
+     - Loads pickles + residual stats via state.load_all()
+     - Seeds each signal's history deque with the last LAG_WINDOW resampled values
+       from today's CSV (instant — no backfill loop)
   2. run_forever() loops every INFERENCE_INTERVAL_SECONDS
-     - Reads new telemetry rows from today's CSV
+     - Reads new telemetry rows written since last cycle
      - Resamples to 5s buckets, processes each in order
      - Anomalous buckets: imputed, logged to anomalies.jsonl
      - All processed buckets: written to residuals/{signal}.csv
@@ -25,6 +25,7 @@ import pandas as pd
 from .config import (
     ANOMALIES_PATH,
     INFERENCE_INTERVAL_SECONDS,
+    LAG_WINDOW,
     LOG_DIR,
     RESIDUALS_DIR,
     SIGNALS,
@@ -97,73 +98,17 @@ def _append_anomaly(record: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Cold-start backfill
-# ---------------------------------------------------------------------------
-
-def _backfill(state: SignalState, signal_name: str, cfg: dict) -> None:
-    """
-    Silently append buckets from train_end_ts to now.
-    No anomaly detection, no residual writes — just updates the model's internal state.
-    After backfill, primes the first live forecast.
-    """
-    sensor = cfg["sensor"]
-    field = cfg["field"]
-
-    try:
-        series = load_sensor_logs(sensor, field, LOG_DIR)
-        if series.empty:
-            log.info("  %s: no log data yet for backfill", signal_name)
-            return
-
-        new = series[series.index > state.train_end_ts]
-        if new.empty:
-            log.info("  %s: no data after train_end — no backfill needed", signal_name)
-        else:
-            resampled = resample_to_5s(new)
-            now_floor = pd.Timestamp.now(tz="UTC").floor("5s")
-            resampled = resampled[resampled.index < now_floor]
-
-            if not resampled.empty:
-                log.info(
-                    "  %s: backfilling %d buckets (%s → %s)",
-                    signal_name, len(resampled),
-                    resampled.index[0], resampled.index[-1],
-                )
-                for val in resampled.values:
-                    state.model = state.model.append([float(val)], refit=False)
-                _last_processed_ts[signal_name] = resampled.index[-1]
-            else:
-                log.info("  %s: backfill range is empty", signal_name)
-
-            # Always anchor last_processed_ts so the inference cycle doesn't
-            # re-read the entire training CSV on first run
-            if _last_processed_ts[signal_name] is None:
-                _last_processed_ts[signal_name] = state.train_end_ts
-                log.info("  %s: anchored last_processed_ts to train_end=%s",
-                         signal_name, state.train_end_ts)
-
-        # Prime first forecast regardless
-        forecast = state.model.forecast(steps=1)
-        state.next_pred = float(forecast.iloc[0])
-        state.next_pred_ts = (
-            (_last_processed_ts.get(signal_name) or state.train_end_ts)
-            + pd.Timedelta(seconds=5)
-        )
-        log.info("  %s: first forecast → %.4f for %s", signal_name, state.next_pred, state.next_pred_ts)
-
-    except Exception as exc:
-        log.error("Backfill failed for %s: %s", signal_name, exc)
-
-
-# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 def reload_models() -> None:
-    """Load (or reload) all SARIMA models and run backfill. Safe to call multiple times."""
+    """
+    Load (or reload) all XGBoost models and seed each signal's history deque
+    from the tail of the log CSVs. Safe to call multiple times.
+    """
     global _states, _last_processed_ts
 
-    log.info("Loading SARIMA models...")
+    log.info("Loading XGBoost models...")
     _states = _state_mod.load_all()
     _last_processed_ts = {name: None for name in _states}
 
@@ -171,15 +116,41 @@ def reload_models() -> None:
         log.warning("No models loaded — run: python forecasting/train.py --all")
         return
 
-    log.info("Running cold-start backfill for %d signals...", len(_states))
+    log.info("Seeding history deques from recent log data...")
     for name, st in _states.items():
-        _backfill(st, name, SIGNALS[name])
+        cfg = SIGNALS[name]
+        sensor = cfg["sensor"]
+        field = cfg["field"]
+        try:
+            series = load_sensor_logs(sensor, field, LOG_DIR)
+            if series.empty:
+                log.info("  %s: no log data — will warm up from live data", name)
+                continue
+
+            resampled = resample_to_5s(series)
+            if resampled.empty:
+                log.info("  %s: resampled series empty — will warm up from live data", name)
+                continue
+
+            # Seed the deque with the last LAG_WINDOW values
+            tail = resampled.iloc[-LAG_WINDOW:]
+            for val in tail:
+                st.history.append(float(val))
+
+            # Anchor last_processed_ts so we don't re-read the whole CSV next cycle
+            _last_processed_ts[name] = resampled.index[-1]
+            log.info(
+                "  %s: seeded %d/%d history values, last_ts=%s",
+                name, len(st.history), LAG_WINDOW, _last_processed_ts[name],
+            )
+        except Exception as exc:
+            log.error("  %s: seed failed — %s", name, exc)
 
     log.info("Inference ready. Signals: %s", sorted(_states))
 
 
 async def run_forever() -> None:
-    """Asyncio task: load models once, then process one bucket per cycle."""
+    """Asyncio task: load models once, then process new buckets every cycle."""
     reload_models()
     while True:
         await asyncio.sleep(INFERENCE_INTERVAL_SECONDS)
@@ -209,19 +180,43 @@ async def _inference_cycle() -> None:
             if resampled.empty:
                 continue
 
-            for ts, actual_val in resampled.items():
-                actual = float(actual_val)
-                prev_pred = state.next_pred  # prediction for THIS bucket
+            # If catching up on many buckets, silently seed history with all but
+            # the last one, then only run full anomaly detection on the freshest bucket.
+            if len(resampled) > 2:
+                catch_up = resampled.iloc[:-1]
+                log.info("  %s: catch-up %d old buckets (history seed only)", signal_name, len(catch_up))
+                for val in catch_up:
+                    # Just push into history — don't run anomaly detection on stale data
+                    if len(state.history) >= LAG_WINDOW:
+                        state.history.append(float(val))
+                    else:
+                        state.history.append(float(val))
+                resampled = resampled.iloc[-1:]
 
+            for i in range(len(resampled)):
+                ts: pd.Timestamp = resampled.index[i]  # type: ignore[assignment]
+                actual = float(resampled.iloc[i])
                 record = _state_mod.process_bucket(state, signal_name, ts, actual)
 
-                # Write residual (only when we had a prior prediction)
-                if prev_pred is not None:
-                    z_score = record["z_score"] if record else 0.0
+                # Write residual whenever we have a full history (i.e. a prediction was made)
+                if len(state.history) >= LAG_WINDOW:
+                    # Reconstruct predicted from the record if anomaly, else recalculate
+                    if record is not None:
+                        predicted = record["predicted"]
+                        z_score = record["z_score"]
+                        is_anomaly = True
+                    else:
+                        # Re-derive predicted for residual logging (history was already updated)
+                        import numpy as np
+                        lags = list(reversed(list(state.history)[-LAG_WINDOW:]))
+                        features = np.array([[*lags, ts.hour, ts.minute]], dtype=np.float32)
+                        predicted = float(state.model.predict(features)[0])
+                        z_score = 0.0
+                        is_anomaly = False
                     _write_residual(
                         signal_name, ts,
-                        predicted=prev_pred, actual=actual,
-                        z_score=z_score, is_anomaly=record is not None,
+                        predicted=predicted, actual=actual,
+                        z_score=z_score, is_anomaly=is_anomaly,
                     )
 
                 if record:

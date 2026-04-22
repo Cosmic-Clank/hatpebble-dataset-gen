@@ -1,5 +1,9 @@
 """
-SARIMA training script — run once to produce model pickles.
+XGBoost training script — run once to produce model pickles.
+
+For each signal, reads the live telemetry CSVs, resamples to 5s buckets,
+builds a lag feature matrix, fits an XGBRegressor, and saves the model
+along with residual statistics used for z-score anomaly detection.
 
 Usage (from backend/):
     python forecasting/train.py --all
@@ -15,26 +19,46 @@ import pickle
 import sys
 from pathlib import Path
 
-# Ensure backend/ is on sys.path when run as a script
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import numpy as np
 import pandas as pd
-from statsmodels.tsa.statespace.sarimax import SARIMAX
+from xgboost import XGBRegressor
 
 from forecasting.config import (
     ANOMALY_Z_THRESHOLD,
+    LAG_WINDOW,
     LOG_DIR,
     MIN_TRAINING_BUCKETS,
     MODELS_DIR,
     RESIDUAL_STATS_PATH,
-    SARIMA_ORDER,
-    SARIMA_SEASONAL_ORDER,
     SIGNALS,
+    XGB_LEARNING_RATE,
+    XGB_MAX_DEPTH,
+    XGB_N_ESTIMATORS,
 )
 from forecasting.preprocess import load_sensor_logs, resample_to_5s
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 log = logging.getLogger("train")
+
+
+def build_features(series: pd.Series, lag: int) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Build (X, y) arrays from a time series using lag features + time-of-day.
+
+    Each row of X: [v(t-1), v(t-2), ..., v(t-lag), hour, minute]
+    y[i]:          v(t)
+    """
+    vals = series.values
+    idx = series.index
+    X, y = [], []
+    for i in range(lag, len(vals)):
+        lags = vals[i - lag:i][::-1]   # [t-1, t-2, ..., t-lag]
+        ts = idx[i]
+        X.append([*lags, ts.hour, ts.minute])
+        y.append(vals[i])
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 
 
 def train_signal(signal_name: str, cfg: dict) -> dict | None:
@@ -45,7 +69,7 @@ def train_signal(signal_name: str, cfg: dict) -> dict | None:
     series = load_sensor_logs(sensor, field, LOG_DIR)
 
     if series.empty:
-        log.warning("  No data found — run mock_training_data.py first, then retry.")
+        log.warning("  No data — run mock_training_data.py first, then retry.")
         return None
 
     resampled = resample_to_5s(series)
@@ -60,40 +84,43 @@ def train_signal(signal_name: str, cfg: dict) -> dict | None:
         return None
 
     log.info("  %d buckets  %s → %s", n, resampled.index[0], resampled.index[-1])
-    log.info("  Fitting SARIMA%s ...", SARIMA_ORDER)
 
-    model = SARIMAX(
-        resampled,
-        order=SARIMA_ORDER,
-        seasonal_order=SARIMA_SEASONAL_ORDER,
-        enforce_stationarity=False,
-        enforce_invertibility=False,
+    X, y = build_features(resampled, LAG_WINDOW)
+    log.info("  Feature matrix: %s  (lag=%d + 2 time features)", X.shape, LAG_WINDOW)
+
+    model = XGBRegressor(
+        n_estimators=XGB_N_ESTIMATORS,
+        max_depth=XGB_MAX_DEPTH,
+        learning_rate=XGB_LEARNING_RATE,
+        tree_method="hist",
+        verbosity=0,
     )
-    results = model.fit(disp=False)
+    model.fit(X, y)
 
-    in_sample = results.fittedvalues
-    residuals = resampled - in_sample
+    preds = model.predict(X)
+    residuals = y - preds
     res_mean = float(residuals.mean())
     res_std = float(residuals.std())
     threshold = ANOMALY_Z_THRESHOLD * res_std
-    train_end_ts = resampled.index[-1].isoformat()
 
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     model_path = MODELS_DIR / f"{signal_name}.pkl"
     with open(model_path, "wb") as f:
-        pickle.dump(results, f)
+        pickle.dump(model, f)
 
     log.info(
-        "  AIC=%.1f  residual_mean=%.4f  residual_std=%.4f  threshold=±%.4f",
-        results.aic, res_mean, res_std, threshold,
+        "  residual_mean=%.4f  residual_std=%.4f  threshold=±%.4f",
+        res_mean, res_std, threshold,
     )
     log.info("  Saved → %s", model_path)
 
-    return {"mean": res_mean, "std": res_std, "train_end_ts": train_end_ts}
+    return {"mean": res_mean, "std": res_std}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train SARIMA models for EMS anomaly detection")
+    parser = argparse.ArgumentParser(
+        description="Train XGBoost models for EMS anomaly detection"
+    )
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--all", action="store_true", help="Train all configured signals")
     group.add_argument("--signal", metavar="NAME", help="Train a single signal by name")
@@ -107,7 +134,7 @@ def main() -> None:
         log.error("Unknown signal '%s'. Available: %s", args.signal, sorted(SIGNALS))
         sys.exit(1)
 
-    # Load existing stats so we can update without overwriting other signals
+    # Load existing stats so we update without overwriting other signals
     stats: dict = {}
     if RESIDUAL_STATS_PATH.exists():
         with open(RESIDUAL_STATS_PATH) as f:

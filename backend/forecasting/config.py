@@ -16,8 +16,12 @@ SIGNALS: dict[str, dict[str, str]] = {
     "battery_soc":        {"sensor": "battery", "field": "soc"},
 }
 
-SARIMA_ORDER = (1, 1, 1)
-SARIMA_SEASONAL_ORDER = (0, 0, 0, 0)
+# XGBoost model parameters
+LAG_WINDOW = 5               # number of lag readings used as features
+XGB_N_ESTIMATORS = 200
+XGB_MAX_DEPTH = 4
+XGB_LEARNING_RATE = 0.1
+
 RESAMPLE_INTERVAL = "5s"
 INFERENCE_INTERVAL_SECONDS = 5
 ANOMALY_Z_THRESHOLD = 3.0

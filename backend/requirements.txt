@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 websockets
 aiomqtt
-statsmodels>=0.14
 pandas>=2.0
 numpy>=1.24
+xgboost
+scikit-learn
