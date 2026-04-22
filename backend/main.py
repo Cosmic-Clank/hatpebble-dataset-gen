@@ -6,14 +6,14 @@ import json
 import logging
 import os
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-
 import dataclasses
 
 import aiomqtt
 import ids as ids_engine
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+import forecasting.inference as _forecasting
+from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 logging.basicConfig(level=logging.INFO)
@@ -241,6 +241,7 @@ async def startup():
     _load_today_history()
     ids_engine.load_today_alerts()
     asyncio.create_task(mqtt_listener())
+    asyncio.create_task(_forecasting.run_forever())
     log.info("MQTT listener started")
 
 
@@ -339,6 +340,96 @@ async def list_logs():
             "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
         })
     return {"log_dir": str(LOG_DIR), "files": files}
+
+# ---------------------------------------------------------------------------
+# Forecasting / anomaly detection endpoints
+# ---------------------------------------------------------------------------
+
+from forecasting.config import ANOMALIES_PATH, RESIDUALS_DIR, SIGNALS
+
+
+@app.get("/api/anomalies")
+async def get_anomalies(
+    limit: int = Query(100, ge=1, le=2000),
+    signal: str | None = Query(None),
+    since: str | None = Query(None),
+):
+    """Return anomaly records from anomalies.jsonl (newest first)."""
+    if not ANOMALIES_PATH.exists():
+        return []
+    records: list[dict] = []
+    with open(ANOMALIES_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    if signal:
+        records = [r for r in records if r.get("signal") == signal]
+    if since:
+        records = [r for r in records if r.get("timestamp", "") >= since]
+    return list(reversed(records))[-limit:]
+
+
+@app.get("/api/anomalies/summary")
+async def get_anomalies_summary():
+    """Count anomalies by severity and signal for the last 24h."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+    counts: dict = {"critical": 0, "high": 0, "medium": 0, "by_signal": {}}
+    if ANOMALIES_PATH.exists():
+        with open(ANOMALIES_PATH, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    r = json.loads(line)
+                    if r.get("timestamp", "") < cutoff:
+                        continue
+                    sev = r.get("severity", "medium")
+                    counts[sev] = counts.get(sev, 0) + 1
+                    sig = r.get("signal", "unknown")
+                    counts["by_signal"][sig] = counts["by_signal"].get(sig, 0) + 1
+                except json.JSONDecodeError:
+                    pass
+    return counts
+
+
+@app.get("/api/residuals/{signal}")
+async def get_residuals(signal: str, window: int = Query(300, ge=10, le=86400)):
+    """Return predicted vs actual residual data for the last `window` seconds."""
+    if signal not in SIGNALS:
+        raise HTTPException(status_code=404, detail=f"Unknown signal: {signal}")
+    path = RESIDUALS_DIR / f"{signal}.csv"
+    if not path.exists():
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
+    rows: list[dict] = []
+    with open(path, "r", encoding="utf-8") as f:
+        import csv as _csv
+        reader = _csv.DictReader(f)
+        for row in reader:
+            if row.get("timestamp", "") >= cutoff:
+                rows.append({
+                    "timestamp": row["timestamp"],
+                    "predicted": float(row["predicted"]) if row.get("predicted") else None,
+                    "actual": float(row["actual"]) if row.get("actual") else None,
+                    "residual": float(row["residual"]) if row.get("residual") else None,
+                    "z_score": float(row["z_score"]) if row.get("z_score") else None,
+                    "is_anomaly": row.get("is_anomaly") == "1",
+                })
+    return rows
+
+
+@app.post("/api/forecasting/reload")
+async def reload_forecasting():
+    """Reload SARIMA models from disk and rerun backfill. Elevated access only."""
+    _forecasting.reload_models()
+    return {"ok": True, "loaded": list(_forecasting._states.keys())}
+
 
 # ---------------------------------------------------------------------------
 # WebSocket endpoints — send history backlog, then stream live

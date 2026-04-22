@@ -7,6 +7,7 @@ import BatteryDashboard from "@/components/BatteryDashboard";
 import ACMeterDashboard from "@/components/ACMeterDashboard";
 import LoadControlPanel from "@/components/LoadControlPanel";
 import AlertsFeed from "@/components/AlertsFeed";
+import AnomalyMonitor from "@/components/AnomalyMonitor";
 import { useAuth } from "@/lib/auth-context";
 
 export default function Home() {
@@ -56,6 +57,7 @@ export default function Home() {
           {page === "alerts" && (
             <AlertsFeed onUnseenChange={(n) => { if (page !== "alerts") setAlertBadge(n); }} />
           )}
+          {page === "anomalies" && <AnomalyMonitor />}
         </main>
 
         {/* Footer */}
@@ -77,7 +79,8 @@ function PageTitle({ page }: { page: Page }) {
     "controls-load1": { label: "Controls — Load Group 1", sub: "Load management" },
     "controls-load2": { label: "Controls — Load Group 2", sub: "Load management" },
     "controls-load3": { label: "Controls — Load Group 3", sub: "Load management" },
-    alerts: { label: "Security Alerts", sub: "IDS engine" },
+    alerts:     { label: "Security Alerts",   sub: "IDS engine" },
+    anomalies:  { label: "Anomaly Monitor",   sub: "SARIMA forecasting" },
   };
   const t = titles[page];
   return (

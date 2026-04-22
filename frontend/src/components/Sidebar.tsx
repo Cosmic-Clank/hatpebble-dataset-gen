@@ -12,7 +12,8 @@ export type Page =
   | "controls-load1"
   | "controls-load2"
   | "controls-load3"
-  | "alerts";
+  | "alerts"
+  | "anomalies";
 
 interface Props {
   active: Page;
@@ -94,6 +95,14 @@ function IconShield() {
   );
 }
 
+function IconWave() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M2 12c1.5-3 3-4.5 4.5-4.5S9 9 10.5 9s3-3 4.5-3 3 1.5 4.5 4.5c1.5 3 3 4.5 3 4.5" />
+    </svg>
+  );
+}
+
 export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
   const { user, role, signOut } = useAuth();
 
@@ -125,7 +134,8 @@ export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
     {
       title: "Security",
       items: [
-        { id: "alerts", label: "Alerts", icon: <IconShield /> },
+        { id: "alerts",    label: "Alerts",           icon: <IconShield /> },
+        { id: "anomalies", label: "Anomaly Monitor",  icon: <IconWave /> },
       ],
     },
   ];
@@ -135,6 +145,7 @@ export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
     if (page === "battery") return "#22c55e";
     if (page.startsWith("controls")) return "#f59e0b";
     if (page === "alerts") return "#ef4444";
+    if (page === "anomalies") return "#8b5cf6";
     return "#3b82f6";
   }
 

@@ -41,29 +41,42 @@ export default function LoadControlPanel({ loadGroup, label }: Props) {
   });
   const [sending, setSending] = useState(false);
 
-  // Poll control state from backend — picks up server-side changes like auto-trips
+  // Initial fetch — populates all fields including text inputs
   useEffect(() => {
-    function sync() {
+    fetch(`${API_URL}/control/${loadGroup}`)
+      .then((r) => r.json())
+      .then((data) =>
+        setState((prev) => ({
+          ...prev,
+          relay:     data.relay     ?? prev.relay,
+          threshold: data.threshold != null ? String(data.threshold) : "",
+          on_time:   data.on_time   ?? "",
+          off_time:  data.off_time  ?? "",
+          priority:  data.priority  ?? prev.priority,
+        }))
+      )
+      .catch(() => {});
+  }, [loadGroup]);
+
+  // Recurring poll — only syncs instant-action fields (relay, priority).
+  // Text inputs (threshold, on_time, off_time) are excluded so typing isn't interrupted.
+  useEffect(() => {
+    const id = setInterval(() => {
       fetch(`${API_URL}/control/${loadGroup}`)
         .then((r) => r.json())
         .then((data) =>
           setState((prev) => ({
             ...prev,
-            relay: data.relay ?? prev.relay,
-            threshold: data.threshold != null ? String(data.threshold) : "",
-            on_time: data.on_time ?? "",
-            off_time: data.off_time ?? "",
+            relay:    data.relay    ?? prev.relay,
             priority: data.priority ?? prev.priority,
           }))
         )
         .catch(() => {});
-    }
-    sync();
-    const id = setInterval(sync, 1000);
+    }, 1000);
     return () => clearInterval(id);
   }, [loadGroup]);
 
-  async function sendControl(update: Partial<ControlState> & Record<string, unknown>) {
+  async function sendControl(update: Record<string, unknown>) {
     setSending(true);
     try {
       const res = await fetch(`${API_URL}/control/${loadGroup}`, {
@@ -157,7 +170,7 @@ export default function LoadControlPanel({ loadGroup, label }: Props) {
             onSubmit={(e) => {
               e.preventDefault();
               const val = state.threshold.trim();
-              sendControl({ threshold: val === "" ? null : Number(val) });
+              sendControl({ threshold: val === "" ? undefined : Number(val) });
             }}
             className="flex items-center gap-2"
           >
@@ -191,7 +204,7 @@ export default function LoadControlPanel({ loadGroup, label }: Props) {
                 type="time"
                 value={state.on_time}
                 onChange={(e) => setState((p) => ({ ...p, on_time: e.target.value }))}
-                onBlur={() => sendControl({ on_time: state.on_time || null })}
+                onBlur={() => sendControl({ on_time: state.on_time || undefined })}
                 className="w-full px-3 py-2 bg-background border border-card-border rounded-lg text-sm focus:outline-none focus:border-accent-amber"
               />
             </div>
@@ -201,7 +214,7 @@ export default function LoadControlPanel({ loadGroup, label }: Props) {
                 type="time"
                 value={state.off_time}
                 onChange={(e) => setState((p) => ({ ...p, off_time: e.target.value }))}
-                onBlur={() => sendControl({ off_time: state.off_time || null })}
+                onBlur={() => sendControl({ off_time: state.off_time || undefined })}
                 className="w-full px-3 py-2 bg-background border border-card-border rounded-lg text-sm focus:outline-none focus:border-accent-amber"
               />
             </div>
