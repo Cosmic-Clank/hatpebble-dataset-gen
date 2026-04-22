@@ -135,6 +135,13 @@ def _backfill(state: SignalState, signal_name: str, cfg: dict) -> None:
             else:
                 log.info("  %s: backfill range is empty", signal_name)
 
+            # Always anchor last_processed_ts so the inference cycle doesn't
+            # re-read the entire training CSV on first run
+            if _last_processed_ts[signal_name] is None:
+                _last_processed_ts[signal_name] = state.train_end_ts
+                log.info("  %s: anchored last_processed_ts to train_end=%s",
+                         signal_name, state.train_end_ts)
+
         # Prime first forecast regardless
         forecast = state.model.forecast(steps=1)
         state.next_pred = float(forecast.iloc[0])

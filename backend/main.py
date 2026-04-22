@@ -1,4 +1,5 @@
 from __future__ import annotations
+from forecasting.config import ANOMALIES_PATH, RESIDUALS_DIR, SIGNALS
 
 import asyncio
 import csv
@@ -76,7 +77,8 @@ ALL_KEYS = ["battery"] + LOAD_GROUPS
 
 latest: dict[str, dict | None] = {k: None for k in ALL_KEYS}
 last_seen: dict[str, str | None] = {k: None for k in ALL_KEYS}
-history: dict[str, deque[dict]] = {k: deque(maxlen=HISTORY_SIZE) for k in ALL_KEYS}
+history: dict[str, deque[dict]] = {
+    k: deque(maxlen=HISTORY_SIZE) for k in ALL_KEYS}
 mqtt_connected = False
 
 # Shared MQTT client reference — set while the listener is connected
@@ -111,6 +113,7 @@ _csv_writers: dict[str, tuple[str, csv.writer, object]] = {}
 # CSV data logger
 # ---------------------------------------------------------------------------
 
+
 def _get_csv_writer(sensor: str) -> csv.writer:
     """Return a CSV writer for today's log file, rotating daily."""
     today = datetime.now().strftime("%Y-%m-%d")
@@ -139,7 +142,8 @@ def log_reading(sensor: str, payload: dict, timestamp: str) -> None:
     """Append a sensor reading to today's CSV log."""
     try:
         writer = _get_csv_writer(sensor)
-        row = [timestamp] + [payload.get(col) for col in CSV_COLUMNS[sensor][1:]]
+        row = [timestamp] + [payload.get(col)
+                             for col in CSV_COLUMNS[sensor][1:]]
         writer.writerow(row)
         _csv_writers[sensor][2].flush()
     except Exception as e:
@@ -148,6 +152,7 @@ def log_reading(sensor: str, payload: dict, timestamp: str) -> None:
 # ---------------------------------------------------------------------------
 # Load history from today's log on startup
 # ---------------------------------------------------------------------------
+
 
 def _load_today_history() -> None:
     """Pre-fill the in-memory history buffer from today's CSV logs."""
@@ -172,13 +177,15 @@ def _load_today_history() -> None:
                         except ValueError:
                             payload[col] = val
                 history[sensor].append(payload)
-            log.info("Loaded %d %s readings from today's log", len(history[sensor]), sensor)
+            log.info("Loaded %d %s readings from today's log",
+                     len(history[sensor]), sensor)
         except Exception as e:
             log.error("Failed to load %s history: %s", sensor, e)
 
 # ---------------------------------------------------------------------------
 # MQTT subscriber (runs as background task)
 # ---------------------------------------------------------------------------
+
 
 async def mqtt_listener():
     global mqtt_connected, _mqtt_client
@@ -187,7 +194,8 @@ async def mqtt_listener():
             async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as client:
                 _mqtt_client = client
                 mqtt_connected = True
-                log.info("Connected to MQTT broker at %s:%s", MQTT_BROKER, MQTT_PORT)
+                log.info("Connected to MQTT broker at %s:%s",
+                         MQTT_BROKER, MQTT_PORT)
                 await client.subscribe("ems/#")
                 async for msg in client.messages:
                     topic = str(msg.topic)
@@ -205,7 +213,8 @@ async def mqtt_listener():
                     for lg, status_topic in STATUS_TOPICS.items():
                         if topic == status_topic:
                             control_state[lg].update(payload)
-                            log.info("Status update from ESP for %s: %s", lg, payload)
+                            log.info(
+                                "Status update from ESP for %s: %s", lg, payload)
                             matched_status = True
                             break
 
@@ -222,8 +231,10 @@ async def mqtt_listener():
                             log.debug("Unknown topic: %s", topic)
 
                     # Run IDS rules against every message (known or unknown topic)
-                    sensor_history = list(history.get(matched_sensor or "", []))
-                    triggered = ids_engine.evaluate_all(topic, payload, sensor_history)
+                    sensor_history = list(
+                        history.get(matched_sensor or "", []))
+                    triggered = ids_engine.evaluate_all(
+                        topic, payload, sensor_history)
                     for alert in triggered:
                         asyncio.create_task(_dispatch_alert(alert))
 
@@ -258,11 +269,12 @@ async def shutdown():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=False)
 
 # ---------------------------------------------------------------------------
 # REST endpoints
 # ---------------------------------------------------------------------------
+
 
 @app.get("/health")
 async def health():
@@ -309,16 +321,19 @@ async def ws_alerts(ws: WebSocket):
 @app.get("/control/{load_group}")
 async def get_control(load_group: str):
     if load_group not in LOAD_GROUPS:
-        raise HTTPException(status_code=404, detail=f"Unknown load group: {load_group}")
+        raise HTTPException(
+            status_code=404, detail=f"Unknown load group: {load_group}")
     return control_state[load_group]
 
 
 @app.post("/control/{load_group}")
 async def send_control(load_group: str, request: Request):
     if load_group not in LOAD_GROUPS:
-        raise HTTPException(status_code=404, detail=f"Unknown load group: {load_group}")
+        raise HTTPException(
+            status_code=404, detail=f"Unknown load group: {load_group}")
     if _mqtt_client is None:
-        raise HTTPException(status_code=503, detail="MQTT broker not connected")
+        raise HTTPException(
+            status_code=503, detail="MQTT broker not connected")
 
     body = await request.json()
     topic = f"ems/control/{load_group}"
@@ -345,8 +360,6 @@ async def list_logs():
 # ---------------------------------------------------------------------------
 # Forecasting / anomaly detection endpoints
 # ---------------------------------------------------------------------------
-
-from forecasting.config import ANOMALIES_PATH, RESIDUALS_DIR, SIGNALS
 
 
 @app.get("/api/anomalies")
@@ -393,7 +406,8 @@ async def get_anomalies_summary():
                     sev = r.get("severity", "medium")
                     counts[sev] = counts.get(sev, 0) + 1
                     sig = r.get("signal", "unknown")
-                    counts["by_signal"][sig] = counts["by_signal"].get(sig, 0) + 1
+                    counts["by_signal"][sig] = counts["by_signal"].get(
+                        sig, 0) + 1
                 except json.JSONDecodeError:
                     pass
     return counts
@@ -403,11 +417,13 @@ async def get_anomalies_summary():
 async def get_residuals(signal: str, window: int = Query(300, ge=10, le=86400)):
     """Return predicted vs actual residual data for the last `window` seconds."""
     if signal not in SIGNALS:
-        raise HTTPException(status_code=404, detail=f"Unknown signal: {signal}")
+        raise HTTPException(
+            status_code=404, detail=f"Unknown signal: {signal}")
     path = RESIDUALS_DIR / f"{signal}.csv"
     if not path.exists():
         return []
-    cutoff = (datetime.now(timezone.utc) - timedelta(seconds=window)).isoformat()
+    cutoff = (datetime.now(timezone.utc) -
+              timedelta(seconds=window)).isoformat()
     rows: list[dict] = []
     with open(path, "r", encoding="utf-8") as f:
         import csv as _csv
