@@ -45,18 +45,20 @@ log = logging.getLogger("train")
 
 def build_features(series: pd.Series, lag: int) -> tuple[np.ndarray, np.ndarray]:
     """
-    Build (X, y) arrays from a time series using lag features + time-of-day.
+    Build (X, y) arrays from a time series using lag features only.
 
-    Each row of X: [v(t-1), v(t-2), ..., v(t-lag), hour, minute]
+    Each row of X: [v(t-1), v(t-2), ..., v(t-lag)]
     y[i]:          v(t)
+
+    Time-of-day features are intentionally omitted: for a 5s prediction horizon
+    the most recent values already carry all necessary context, and hour/minute
+    features generalise poorly when training data covers only a few hours.
     """
     vals = series.values
-    idx = series.index
     X, y = [], []
     for i in range(lag, len(vals)):
         lags = vals[i - lag:i][::-1]   # [t-1, t-2, ..., t-lag]
-        ts = idx[i]
-        X.append([*lags, ts.hour, ts.minute])
+        X.append(lags)
         y.append(vals[i])
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.float32)
 

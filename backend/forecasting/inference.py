@@ -153,7 +153,6 @@ def reload_models() -> None:
 
 async def run_forever() -> None:
     """Asyncio task: load models once, then process new buckets every cycle."""
-    print("NOW ITS HERE")
     reload_models()
     while True:
         await asyncio.sleep(INFERENCE_INTERVAL_SECONDS)
@@ -199,33 +198,17 @@ async def _inference_cycle() -> None:
                 resampled = resampled.iloc[-1:]
 
             for i in range(len(resampled)):
-                # type: ignore[assignment]
-                ts: pd.Timestamp = resampled.index[i]
+                ts: pd.Timestamp = resampled.index[i]  # type: ignore[assignment]
                 actual = float(resampled.iloc[i])
-                record = _state_mod.process_bucket(
+                predicted, record = _state_mod.process_bucket(
                     state, signal_name, ts, actual)
 
-                # Write residual whenever we have a full history (i.e. a prediction was made)
-                if len(state.history) >= LAG_WINDOW:
-                    # Reconstruct predicted from the record if anomaly, else recalculate
-                    if record is not None:
-                        predicted = record["predicted"]
-                        z_score = record["z_score"]
-                        is_anomaly = True
-                    else:
-                        # Re-derive predicted for residual logging (history was already updated)
-                        import numpy as np
-                        lags = list(
-                            reversed(list(state.history)[-LAG_WINDOW:]))
-                        features = np.array(
-                            [[*lags, ts.hour, ts.minute]], dtype=np.float32)
-                        predicted = float(state.model.predict(features)[0])
-                        z_score = 0.0
-                        is_anomaly = False
+                if predicted is not None:
+                    z_score = record["z_score"] if record else 0.0
                     _write_residual(
                         signal_name, ts,
                         predicted=predicted, actual=actual,
-                        z_score=z_score, is_anomaly=is_anomaly,
+                        z_score=z_score, is_anomaly=record is not None,
                     )
 
                 if record:

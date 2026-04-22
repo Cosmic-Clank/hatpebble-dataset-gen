@@ -86,26 +86,26 @@ def process_bucket(
     signal_name: str,
     ts: pd.Timestamp,
     actual: float,
-) -> dict | None:
+) -> tuple[float | None, dict | None]:
     """
     Process one 5s bucket.
 
-    Warming up (history not full yet):
-        Append actual to history, return None.
+    Returns (predicted, anomaly_record):
+      - predicted is None while warming up (history not full yet).
+      - anomaly_record is None when the bucket is normal.
 
+    Warming up: append actual to history, return (None, None).
     Ready:
-        Build feature vector → predict → compute residual + z-score.
-        Normal  → append actual, reset anomaly counter, return None.
-        Anomaly → append predicted (imputation), increment counter, return record.
+      Normal  → append actual, reset counter, return (predicted, None).
+      Anomaly → append predicted (imputation), return (predicted, record).
     """
-    # Warming up — not enough history to predict yet
     if len(state.history) < LAG_WINDOW:
         state.history.append(actual)
-        return None
+        return None, None
 
-    # Build feature vector: [v(t-1), v(t-2), ..., v(t-LAG), hour, minute]
+    # Build feature vector: [v(t-1), v(t-2), ..., v(t-LAG)]
     lags = list(reversed(state.history))           # most-recent first
-    features = np.array([[*lags, ts.hour, ts.minute]], dtype=np.float32)
+    features = np.array([lags], dtype=np.float32)
     predicted = float(state.model.predict(features)[0])
 
     residual = actual - predicted
@@ -118,7 +118,7 @@ def process_bucket(
     if abs(z_score) <= ANOMALY_Z_THRESHOLD:
         state.history.append(actual)
         state.consecutive_anomalies = 0
-        return None
+        return predicted, None
 
     # Anomaly — impute with predicted so the history stays clean
     state.history.append(predicted)
@@ -133,7 +133,7 @@ def process_bucket(
     else:
         severity = "medium"
 
-    return {
+    record = {
         "timestamp": ts.isoformat(),
         "detection_type": "forecast_residual",
         "signal": signal_name,
@@ -148,3 +148,4 @@ def process_bucket(
         "consecutive_anomaly_count": state.consecutive_anomalies,
         "sustained": sustained,
     }
+    return predicted, record
