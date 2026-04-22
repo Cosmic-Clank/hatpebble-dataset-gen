@@ -42,7 +42,8 @@ log = logging.getLogger("forecasting.inference")
 
 _states: dict[str, SignalState] = {}
 _last_processed_ts: dict[str, pd.Timestamp | None] = {}
-_residual_fh: dict[str, object] = {}          # open file handles for residuals CSVs
+# open file handles for residuals CSVs
+_residual_fh: dict[str, object] = {}
 
 RESIDUAL_HEADER = "timestamp,predicted,actual,residual,z_score,is_anomaly\n"
 
@@ -129,7 +130,8 @@ def reload_models() -> None:
 
             resampled = resample_to_5s(series)
             if resampled.empty:
-                log.info("  %s: resampled series empty — will warm up from live data", name)
+                log.info(
+                    "  %s: resampled series empty — will warm up from live data", name)
                 continue
 
             # Seed the deque with the last LAG_WINDOW values
@@ -167,9 +169,12 @@ async def _inference_cycle() -> None:
         sensor = cfg["sensor"]
         field = cfg["field"]
 
+        print(cfg, sensor, field)
+
         try:
             last_ts = _last_processed_ts.get(signal_name)
-            new_data = load_sensor_logs_since(sensor, field, LOG_DIR, since_ts=last_ts)
+            new_data = load_sensor_logs_since(
+                sensor, field, LOG_DIR, since_ts=last_ts)
             if new_data.empty:
                 continue
 
@@ -184,7 +189,8 @@ async def _inference_cycle() -> None:
             # the last one, then only run full anomaly detection on the freshest bucket.
             if len(resampled) > 2:
                 catch_up = resampled.iloc[:-1]
-                log.info("  %s: catch-up %d old buckets (history seed only)", signal_name, len(catch_up))
+                log.info("  %s: catch-up %d old buckets (history seed only)",
+                         signal_name, len(catch_up))
                 for val in catch_up:
                     # Just push into history — don't run anomaly detection on stale data
                     if len(state.history) >= LAG_WINDOW:
@@ -194,9 +200,11 @@ async def _inference_cycle() -> None:
                 resampled = resampled.iloc[-1:]
 
             for i in range(len(resampled)):
-                ts: pd.Timestamp = resampled.index[i]  # type: ignore[assignment]
+                # type: ignore[assignment]
+                ts: pd.Timestamp = resampled.index[i]
                 actual = float(resampled.iloc[i])
-                record = _state_mod.process_bucket(state, signal_name, ts, actual)
+                record = _state_mod.process_bucket(
+                    state, signal_name, ts, actual)
 
                 # Write residual whenever we have a full history (i.e. a prediction was made)
                 if len(state.history) >= LAG_WINDOW:
@@ -208,8 +216,10 @@ async def _inference_cycle() -> None:
                     else:
                         # Re-derive predicted for residual logging (history was already updated)
                         import numpy as np
-                        lags = list(reversed(list(state.history)[-LAG_WINDOW:]))
-                        features = np.array([[*lags, ts.hour, ts.minute]], dtype=np.float32)
+                        lags = list(
+                            reversed(list(state.history)[-LAG_WINDOW:]))
+                        features = np.array(
+                            [[*lags, ts.hour, ts.minute]], dtype=np.float32)
                         predicted = float(state.model.predict(features)[0])
                         z_score = 0.0
                         is_anomaly = False
