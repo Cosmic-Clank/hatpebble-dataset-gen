@@ -253,6 +253,7 @@ async def startup():
     _load_today_history()
     ids_engine.load_today_alerts()
     asyncio.create_task(mqtt_listener())
+    print("ITS HERE")
     asyncio.create_task(_forecasting.run_forever())
     log.info("MQTT listener started")
 

@@ -169,8 +169,6 @@ async def _inference_cycle() -> None:
         sensor = cfg["sensor"]
         field = cfg["field"]
 
-        print(cfg, sensor, field)
-
         try:
             last_ts = _last_processed_ts.get(signal_name)
             new_data = load_sensor_logs_since(
