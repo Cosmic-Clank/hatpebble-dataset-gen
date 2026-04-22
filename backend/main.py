@@ -9,6 +9,7 @@ from collections import deque
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import dataclasses
+from typing import Optional
 
 import aiomqtt
 import ids as ids_engine
@@ -351,8 +352,8 @@ from forecasting.config import ANOMALIES_PATH, RESIDUALS_DIR, SIGNALS
 @app.get("/api/anomalies")
 async def get_anomalies(
     limit: int = Query(100, ge=1, le=2000),
-    signal: str | None = Query(None),
-    since: str | None = Query(None),
+    signal: Optional[str] = Query(None),
+    since: Optional[str] = Query(None),
 ):
     """Return anomaly records from anomalies.jsonl (newest first)."""
     if not ANOMALIES_PATH.exists():
