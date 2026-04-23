@@ -877,8 +877,12 @@ You have access to three data tools:
 
 Rules:
 - Always call the appropriate tool(s) before answering. Do not guess from memory.
-- Today's UTC date is {today_utc}. Use this as the reference point for all relative time expressions ("last 3 days", "this week", "today").
-- For "this week" use Monday 00:00:00Z as from_iso. For "last N days" compute from_iso as today minus N days.
+- The current UTC datetime is {now_utc_iso}. Use this exact value as to_iso for any query that includes "now", "current", "today", "most recent", or "latest".
+- IMPORTANT: All timestamps in the data are UTC. Do NOT use local midnight as from_iso — always use rolling windows relative to now. For example: "last 24 hours" means from_iso = {now_minus_24h_iso}, to_iso = {now_utc_iso}.
+- For "most recent", "latest", or "current" data: use from_iso = {now_minus_24h_iso}, to_iso = {now_utc_iso}.
+- For "today": use from_iso = {now_minus_24h_iso}, to_iso = {now_utc_iso} (rolling 24h, not calendar day).
+- For "last N days": from_iso = now minus N days, to_iso = {now_utc_iso}.
+- For "this week": from_iso = {now_minus_7d_iso}, to_iso = {now_utc_iso}.
 - Return concise factual answers with specific numbers. Round values to 2 decimal places.
 - If data is empty or unavailable, say so clearly.
 - Do not mention internal tool names, JSON, or bucket structure in your answer. Speak naturally.
@@ -899,8 +903,16 @@ async def ai_query(body: AIQueryRequest):
     if not api_key:
         raise HTTPException(status_code=503, detail="OpenAI API key not configured on the server.")
 
-    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    system_content = _AI_SYSTEM_PROMPT.replace("{today_utc}", today_utc)
+    now_utc = datetime.now(timezone.utc)
+    now_utc_iso      = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_minus_24h    = (now_utc - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_minus_7d     = (now_utc - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    system_content = (
+        _AI_SYSTEM_PROMPT
+        .replace("{now_utc_iso}",       now_utc_iso)
+        .replace("{now_minus_24h_iso}", now_minus_24h)
+        .replace("{now_minus_7d_iso}",  now_minus_7d)
+    )
 
     messages: list[dict] = [
         {"role": "system", "content": system_content},
