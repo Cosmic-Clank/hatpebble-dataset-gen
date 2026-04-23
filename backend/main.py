@@ -12,12 +12,19 @@ from pathlib import Path
 import dataclasses
 from typing import Optional
 
+from dotenv import load_dotenv
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
+import openai
 import pandas as pd
 import aiomqtt
 import ids as ids_engine
 import forecasting.inference as _forecasting
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+
+_openai_client = openai.AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY", ""))
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("ems")
@@ -603,3 +610,333 @@ async def ws_ac_load2(ws: WebSocket):
 @app.websocket("/ws/ac/load3")
 async def ws_ac_load3(ws: WebSocket):
     await _stream(ws, "load3")
+
+
+# ---------------------------------------------------------------------------
+# AI Insights — natural language query endpoint
+# ---------------------------------------------------------------------------
+
+_BATTERY_VALUE_COLS = ["battery_voltage", "battery_current", "battery_power", "soc", "temperature"]
+_LOAD_VALUE_COLS    = ["ac_voltage", "ac_current", "active_power", "active_energy", "frequency", "power_factor"]
+
+
+def _aggregate_df(df: pd.DataFrame, time_col: str, value_cols: list[str],
+                  dt_from: datetime, dt_to: datetime) -> list[dict]:
+    """Bucket a sensor DataFrame by adaptive time resolution."""
+    span_hours = (dt_to - dt_from).total_seconds() / 3600
+    if span_hours <= 6:
+        freq = "5min"
+    elif span_hours <= 48:
+        freq = "1h"
+    elif span_hours <= 336:
+        freq = "1D"
+    else:
+        freq = "1W"
+
+    df = df.copy()
+    df[time_col] = pd.to_datetime(df[time_col], utc=True, errors="coerce")
+    df = df.dropna(subset=[time_col])
+    df = df[(df[time_col] >= dt_from) & (df[time_col] <= dt_to)]
+    if df.empty:
+        return []
+
+    for col in value_cols:
+        df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.set_index(time_col).sort_index()
+    rows: list[dict] = []
+    for bucket_ts, group in df[value_cols].resample(freq):
+        if group.empty:
+            continue
+        row: dict = {"bucket_start": bucket_ts.isoformat(), "count": int(len(group))}
+        for col in value_cols:
+            vals = group[col].dropna()
+            if vals.empty:
+                row[f"{col}_min"] = row[f"{col}_max"] = row[f"{col}_avg"] = None
+            else:
+                row[f"{col}_min"] = round(float(vals.min()), 4)
+                row[f"{col}_max"] = round(float(vals.max()), 4)
+                row[f"{col}_avg"] = round(float(vals.mean()), 4)
+        rows.append(row)
+    return rows[:500]
+
+
+def _execute_query_sensor_data(sensor: str, from_iso: str, to_iso: str,
+                                fields: list[str] | None) -> dict:
+    now = datetime.now(timezone.utc)
+    dt_from = _parse_ts(from_iso, now - timedelta(days=1))
+    dt_to   = _parse_ts(to_iso, now)
+
+    df = _load_csvs_for_range(f"{sensor}_*.csv", dt_from, dt_to, date_prefix_len=1)
+    if df.empty:
+        return {"error": f"No data found for sensor '{sensor}' in the requested range.", "buckets": []}
+
+    all_cols = _BATTERY_VALUE_COLS if sensor == "battery" else _LOAD_VALUE_COLS
+    value_cols = [f for f in (fields or all_cols) if f in all_cols]
+    if not value_cols:
+        return {"error": f"None of the requested fields are valid for sensor '{sensor}'.", "buckets": []}
+
+    buckets = _aggregate_df(df, "timestamp", value_cols, dt_from, dt_to)
+    return {
+        "sensor": sensor,
+        "from": from_iso,
+        "to": to_iso,
+        "bucket_count": len(buckets),
+        "fields_aggregated": value_cols,
+        "buckets": buckets,
+    }
+
+
+def _execute_query_alert_data(from_iso: str, to_iso: str, severity: str | None) -> dict:
+    now = datetime.now(timezone.utc)
+    dt_from = _parse_ts(from_iso, now - timedelta(days=1))
+    dt_to   = _parse_ts(to_iso, now)
+
+    df = _load_csvs_for_range("alerts_*.csv", dt_from, dt_to, date_prefix_len=1)
+    if df.empty:
+        return {"total": 0, "by_severity": {}, "sample_alerts": []}
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    df = df[(df["timestamp"] >= dt_from) & (df["timestamp"] <= dt_to)]
+
+    sev_filter = severity if severity and severity != "all" else None
+    if sev_filter:
+        df = df[df["severity"] == sev_filter]
+
+    by_severity = df["severity"].value_counts().to_dict() if "severity" in df.columns else {}
+    sample = df.sort_values("timestamp", ascending=False).head(20).copy()
+    sample["timestamp"] = sample["timestamp"].apply(lambda t: t.isoformat())
+    cols = [c for c in ["timestamp", "rule", "severity", "message"] if c in sample.columns]
+    return {
+        "total": int(len(df)),
+        "by_severity": {str(k): int(v) for k, v in by_severity.items()},
+        "sample_alerts": _clean_records(sample[cols].fillna("")),
+    }
+
+
+def _execute_query_anomaly_data(from_iso: str, to_iso: str, signal: str | None) -> dict:
+    if not ANOMALIES_PATH.exists():
+        return {"total": 0, "by_severity": {}, "by_signal": {}, "top_anomalies": []}
+
+    records: list[dict] = []
+    with open(ANOMALIES_PATH, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                records.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+
+    records = [r for r in records if from_iso <= r.get("timestamp", "") <= to_iso]
+    if signal:
+        records = [r for r in records if r.get("signal") == signal]
+
+    by_severity: dict[str, int] = {}
+    by_signal: dict[str, int] = {}
+    for r in records:
+        sev = r.get("severity", "medium")
+        by_severity[sev] = by_severity.get(sev, 0) + 1
+        sig = r.get("signal", "unknown")
+        by_signal[sig] = by_signal.get(sig, 0) + 1
+
+    top = sorted(records, key=lambda r: abs(r.get("z_score", 0)), reverse=True)[:20]
+    return {
+        "total": len(records),
+        "by_severity": by_severity,
+        "by_signal": by_signal,
+        "top_anomalies": [
+            {
+                "timestamp": r.get("timestamp"),
+                "signal":    r.get("signal"),
+                "z_score":   round(r.get("z_score", 0), 3),
+                "severity":  r.get("severity"),
+                "sustained": r.get("sustained", False),
+            }
+            for r in top
+        ],
+    }
+
+
+def _dispatch_ai_tool(name: str, arguments: dict) -> str:
+    try:
+        if name == "query_sensor_data":
+            result = _execute_query_sensor_data(
+                sensor=arguments["sensor"],
+                from_iso=arguments["from_iso"],
+                to_iso=arguments["to_iso"],
+                fields=arguments.get("fields"),
+            )
+        elif name == "query_alert_data":
+            result = _execute_query_alert_data(
+                from_iso=arguments["from_iso"],
+                to_iso=arguments["to_iso"],
+                severity=arguments.get("severity"),
+            )
+        elif name == "query_anomaly_data":
+            result = _execute_query_anomaly_data(
+                from_iso=arguments["from_iso"],
+                to_iso=arguments["to_iso"],
+                signal=arguments.get("signal"),
+            )
+        else:
+            result = {"error": f"Unknown tool: {name}"}
+    except Exception as exc:
+        result = {"error": str(exc)}
+    return json.dumps(result)
+
+
+_AI_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "query_sensor_data",
+            "description": (
+                "Fetch aggregated sensor readings from daily CSV logs. "
+                "Returns time-bucketed min/max/avg/count for the requested columns. "
+                "Battery sensor columns: battery_voltage, battery_current, battery_power, soc, temperature. "
+                "Load sensors (load1/load2/load3) columns: ac_voltage, ac_current, active_power, active_energy, frequency, power_factor."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sensor": {
+                        "type": "string",
+                        "enum": ["battery", "load1", "load2", "load3"],
+                    },
+                    "from_iso": {"type": "string", "description": "Start of time range in ISO 8601 UTC, e.g. 2026-04-20T00:00:00Z"},
+                    "to_iso":   {"type": "string", "description": "End of time range in ISO 8601 UTC."},
+                    "fields": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Specific column names to aggregate. Omit for all available fields.",
+                    },
+                },
+                "required": ["sensor", "from_iso", "to_iso"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_alert_data",
+            "description": (
+                "Fetch IDS security alert records from daily alert CSV logs. "
+                "Returns total count, breakdown by severity, and a sample of recent alerts. "
+                "Severity values: info, warning, critical."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_iso": {"type": "string"},
+                    "to_iso":   {"type": "string"},
+                    "severity": {
+                        "type": "string",
+                        "enum": ["info", "warning", "critical", "all"],
+                        "description": "Filter by severity. Use 'all' for no filter.",
+                    },
+                },
+                "required": ["from_iso", "to_iso"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_anomaly_data",
+            "description": (
+                "Fetch SARIMA anomaly detections from the anomalies log. "
+                "Returns total count, breakdown by severity and signal, and top anomalies by z-score magnitude. "
+                "Each anomaly has: timestamp, signal, z_score, severity (medium/high/critical), sustained (bool)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "from_iso": {"type": "string"},
+                    "to_iso":   {"type": "string"},
+                    "signal": {
+                        "type": "string",
+                        "description": "Optional signal name filter, e.g. 'load1_active_power'. Omit for all signals.",
+                    },
+                },
+                "required": ["from_iso", "to_iso"],
+            },
+        },
+    },
+]
+
+_AI_SYSTEM_PROMPT = """\
+You are an AI assistant embedded in a Smart Grid Energy Management System (EMS) dashboard.
+
+You have access to three data tools:
+- query_sensor_data: Reads battery or AC load sensor readings from CSV logs. Returns time-bucketed statistics (min/max/avg) per bucket. Battery columns: battery_voltage (V), battery_current (A), battery_power (W), soc (%), temperature (°C). Load groups (load1/load2/load3) columns: ac_voltage, ac_current, active_power (W), active_energy (kWh), frequency (Hz), power_factor.
+- query_alert_data: Reads IDS security alerts (info/warning/critical) from the intrusion detection system.
+- query_anomaly_data: Reads SARIMA-based anomaly detections with z-scores per signal.
+
+Rules:
+- Always call the appropriate tool(s) before answering. Do not guess from memory.
+- Today's UTC date is {today_utc}. Use this as the reference point for all relative time expressions ("last 3 days", "this week", "today").
+- For "this week" use Monday 00:00:00Z as from_iso. For "last N days" compute from_iso as today minus N days.
+- Return concise factual answers with specific numbers. Round values to 2 decimal places.
+- If data is empty or unavailable, say so clearly.
+- Do not mention internal tool names, JSON, or bucket structure in your answer. Speak naturally.
+"""
+
+
+class AIQueryRequest(BaseModel):
+    question: str
+
+
+@app.post("/api/ai/query")
+async def ai_query(body: AIQueryRequest):
+    """Answer a natural language question about EMS sensor/alert/anomaly data."""
+    if not body.question.strip():
+        raise HTTPException(status_code=400, detail="Question must not be empty.")
+
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OpenAI API key not configured on the server.")
+
+    today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    system_content = _AI_SYSTEM_PROMPT.replace("{today_utc}", today_utc)
+
+    messages: list[dict] = [
+        {"role": "system", "content": system_content},
+        {"role": "user",   "content": body.question.strip()},
+    ]
+    tools_used: list[str] = []
+
+    loop = asyncio.get_event_loop()
+
+    for _ in range(3):
+        response = await _openai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=messages,
+            tools=_AI_TOOLS,
+            tool_choice="auto",
+            temperature=0.2,
+            max_tokens=1024,
+        )
+        msg = response.choices[0].message
+
+        if not msg.tool_calls:
+            return {"answer": msg.content or "No answer generated.", "tools_used": tools_used}
+
+        messages.append(msg)
+        for tc in msg.tool_calls:
+            tool_name = tc.function.name
+            try:
+                arguments = json.loads(tc.function.arguments)
+            except json.JSONDecodeError:
+                arguments = {}
+            tools_used.append(tool_name)
+            result_json = await loop.run_in_executor(None, _dispatch_ai_tool, tool_name, arguments)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result_json,
+            })
+
+    raise HTTPException(status_code=500, detail="AI query did not converge to a final answer.")
