@@ -32,7 +32,13 @@ log = logging.getLogger("forecasting.inference")
 # ---------------------------------------------------------------------------
 
 FAKE_FORECAST = True
-FAKE_NOISE_RATIO = 0.003   # predicted = actual ± 0.3 % of the signal value
+
+# Noise / drift / anomaly tuning
+_NOISE_RATIO   = 0.004   # baseline Gaussian noise as fraction of signal value
+_DRIFT_RATIO   = 0.008   # max slow drift as fraction of signal value
+_SPIKE_PROB    = 0.04    # probability of a spike per bucket (~1 every 25 buckets)
+_SPIKE_RATIO   = 0.06    # spike magnitude as fraction of signal value (triggers anomaly)
+_ANOMALY_Z_FAKE = 3.5    # z-threshold used for fake anomaly records
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -44,6 +50,9 @@ RESIDUAL_HEADER = "timestamp,predicted,actual,residual,z_score,is_anomaly\n"
 
 # open file handles for residuals CSVs
 _residual_fh: dict[str, object] = {}
+
+# per-signal accumulated drift offset for fake mode
+_fake_drift: dict[str, float] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -161,9 +170,12 @@ async def _inference_cycle() -> None:
 
 async def _fake_inference_cycle() -> None:
     """
-    Fake mode: for each new 5s bucket, generate a predicted value by adding
-    small Gaussian noise to the actual value. Produces realistic-looking charts
-    without needing trained models.
+    Fake mode — produces varied, realistic-looking residuals without real models.
+
+    Per bucket:
+      1. Baseline noise  — small Gaussian jitter always present
+      2. Slow drift      — per-signal accumulated offset that wanders up/down
+      3. Occasional spike — random sharp deviation that triggers a real anomaly record
     """
     for signal_name in SIGNALS:
         cfg = SIGNALS[signal_name]
@@ -180,25 +192,64 @@ async def _fake_inference_cycle() -> None:
             if resampled.empty:
                 continue
 
-            # Only write the most recent bucket to avoid flooding old data
-            latest = resampled.iloc[[-1]]
-            for i in range(len(latest)):
-                ts: pd.Timestamp = latest.index[i]  # type: ignore[assignment]
-                actual = float(latest.iloc[i])
+            # Process only the latest bucket to avoid stale floods
+            ts: pd.Timestamp = resampled.index[-1]  # type: ignore[assignment]
+            actual = float(resampled.iloc[-1])
+            scale = max(abs(actual), 0.1)   # avoid division/scaling issues near zero
 
-                # Noise scaled to signal magnitude (min 0.01 to avoid divide-by-zero)
-                noise_std = max(abs(actual) * FAKE_NOISE_RATIO, 0.01)
-                predicted = actual + random.gauss(0, noise_std)
+            # 1. Baseline noise
+            noise = random.gauss(0, scale * _NOISE_RATIO)
 
-                residual = actual - predicted
-                # z_score kept small — fake predictions should never trigger anomalies
-                z_score = residual / noise_std if noise_std > 0 else 0.0
+            # 2. Slow drift — each signal has an independent accumulated offset
+            prev_drift = _fake_drift.get(signal_name, 0.0)
+            drift_step = random.gauss(0, scale * _DRIFT_RATIO * 0.15)
+            new_drift = prev_drift + drift_step
+            # Mean-revert so drift doesn't walk off to infinity
+            new_drift *= 0.92
+            _fake_drift[signal_name] = new_drift
 
-                _write_residual(
-                    signal_name, ts,
-                    predicted=predicted, actual=actual,
-                    z_score=z_score, is_anomaly=False,
-                )
+            # 3. Spike — random sharp hit
+            spike = 0.0
+            is_spike = random.random() < _SPIKE_PROB
+            if is_spike:
+                direction = random.choice([-1, 1])
+                spike = direction * scale * _SPIKE_RATIO * random.uniform(0.8, 1.4)
+
+            predicted = actual + noise + new_drift + spike
+
+            residual = actual - predicted
+            noise_std = max(scale * _NOISE_RATIO, 0.01)
+            z_score = residual / noise_std
+
+            is_anomaly = abs(z_score) > _ANOMALY_Z_FAKE
+
+            _write_residual(
+                signal_name, ts,
+                predicted=predicted, actual=actual,
+                z_score=z_score, is_anomaly=is_anomaly,
+            )
+
+            if is_anomaly:
+                abs_z = abs(z_score)
+                severity = "critical" if abs_z > 6 else "high" if abs_z > 4 else "medium"
+                record = {
+                    "timestamp": ts.isoformat(),
+                    "detection_type": "forecast_residual",
+                    "signal": signal_name,
+                    "predicted": round(predicted, 4),
+                    "actual": round(actual, 4),
+                    "residual": round(residual, 4),
+                    "residual_training_mean": 0.0,
+                    "residual_training_std": round(noise_std, 4),
+                    "z_score": round(z_score, 3),
+                    "severity": severity,
+                    "imputed": False,
+                    "consecutive_anomaly_count": 1,
+                    "sustained": False,
+                }
+                _append_anomaly(record)
+                log.info("FAKE ANOMALY %s  z=%.2f  actual=%.3f  predicted=%.3f",
+                         signal_name, z_score, actual, predicted)
 
             _last_processed_ts[signal_name] = resampled.index[-1]
 
