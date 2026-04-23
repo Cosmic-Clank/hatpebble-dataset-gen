@@ -12,6 +12,7 @@ from pathlib import Path
 import dataclasses
 from typing import Optional
 
+import pandas as pd
 import aiomqtt
 import ids as ids_engine
 import forecasting.inference as _forecasting
@@ -358,6 +359,117 @@ async def list_logs():
         })
     return {"log_dir": str(LOG_DIR), "files": files}
 
+
+def _parse_ts(ts_str: str | None, default: datetime) -> datetime:
+    if not ts_str:
+        return default
+    ts_str = ts_str.replace("Z", "+00:00")
+    try:
+        return datetime.fromisoformat(ts_str)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Invalid timestamp: {ts_str!r}")
+
+
+def _clean_records(df: pd.DataFrame) -> list[dict]:
+    """Convert DataFrame to JSON-safe list of dicts (NaN → None)."""
+    records = df.to_dict(orient="records")
+    out = []
+    for row in records:
+        out.append({k: (None if (isinstance(v, float) and v != v) else v)
+                    for k, v in row.items()})
+    return out
+
+
+def _load_csvs_for_range(pattern: str, dt_from: datetime, dt_to: datetime,
+                          date_prefix_len: int = 1) -> pd.DataFrame:
+    """
+    Load all CSV files matching `pattern` whose embedded date overlaps [dt_from, dt_to].
+    `date_prefix_len` = number of underscore-separated prefix tokens before the date.
+    e.g. "battery_2026-04-23.csv" → prefix_len=1, "alerts_2026-04-23.csv" → prefix_len=1
+    """
+    dfs = []
+    for f in sorted(LOG_DIR.glob(pattern)):
+        parts = f.stem.split("_", date_prefix_len)
+        if len(parts) < date_prefix_len + 1:
+            continue
+        date_str = parts[date_prefix_len]
+        try:
+            file_date = datetime.strptime(date_str, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if file_date.date() < (dt_from - timedelta(days=1)).date():
+            continue
+        if file_date.date() > (dt_to + timedelta(days=1)).date():
+            continue
+        try:
+            dfs.append(pd.read_csv(f, dtype=str))
+        except Exception as exc:
+            log.error("Failed to read %s: %s", f, exc)
+    if not dfs:
+        return pd.DataFrame()
+    return pd.concat(dfs, ignore_index=True)
+
+
+@app.get("/api/logs/sensor")
+async def get_sensor_logs(
+    sensor: str = Query(..., description="battery | load1 | load2 | load3"),
+    from_ts: Optional[str] = Query(None, alias="from"),
+    to_ts: Optional[str] = Query(None, alias="to"),
+    limit: int = Query(2000, ge=1, le=20000),
+):
+    """Return historical sensor readings from daily CSV logs."""
+    if sensor not in ALL_KEYS:
+        raise HTTPException(status_code=400, detail=f"Unknown sensor: {sensor}. Valid: {ALL_KEYS}")
+
+    now = datetime.now(timezone.utc)
+    dt_from = _parse_ts(from_ts, now - timedelta(hours=24))
+    dt_to   = _parse_ts(to_ts, now)
+
+    df = _load_csvs_for_range(f"{sensor}_*.csv", dt_from, dt_to, date_prefix_len=1)
+    if df.empty:
+        return []
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    df = df[(df["timestamp"] >= dt_from) & (df["timestamp"] <= dt_to)]
+
+    # Convert numeric columns
+    for col in df.columns:
+        if col not in ("timestamp", "date", "time", "alarm_flags"):
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+    df = df.sort_values("timestamp").tail(limit)
+    df["timestamp"] = df["timestamp"].apply(lambda t: t.isoformat())
+    return _clean_records(df)
+
+
+@app.get("/api/logs/alerts")
+async def get_alerts_log(
+    from_ts: Optional[str] = Query(None, alias="from"),
+    to_ts: Optional[str] = Query(None, alias="to"),
+    severity: Optional[str] = Query(None, description="info | warning | critical"),
+    limit: int = Query(2000, ge=1, le=20000),
+):
+    """Return historical IDS alerts from daily alert CSV logs."""
+    now = datetime.now(timezone.utc)
+    dt_from = _parse_ts(from_ts, now - timedelta(hours=24))
+    dt_to   = _parse_ts(to_ts, now)
+
+    df = _load_csvs_for_range("alerts_*.csv", dt_from, dt_to, date_prefix_len=1)
+    if df.empty:
+        return []
+
+    df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
+    df = df.dropna(subset=["timestamp"])
+    df = df[(df["timestamp"] >= dt_from) & (df["timestamp"] <= dt_to)]
+
+    if severity:
+        df = df[df["severity"] == severity]
+
+    df = df.sort_values("timestamp").tail(limit)
+    df["timestamp"] = df["timestamp"].apply(lambda t: t.isoformat())
+    return _clean_records(df)
+
 # ---------------------------------------------------------------------------
 # Forecasting / anomaly detection endpoints
 # ---------------------------------------------------------------------------
@@ -365,9 +477,10 @@ async def list_logs():
 
 @app.get("/api/anomalies")
 async def get_anomalies(
-    limit: int = Query(100, ge=1, le=2000),
+    limit: int = Query(100, ge=1, le=5000),
     signal: Optional[str] = Query(None),
     since: Optional[str] = Query(None),
+    to: Optional[str] = Query(None),
 ):
     """Return anomaly records from anomalies.jsonl (newest first)."""
     if not ANOMALIES_PATH.exists():
@@ -386,6 +499,8 @@ async def get_anomalies(
         records = [r for r in records if r.get("signal") == signal]
     if since:
         records = [r for r in records if r.get("timestamp", "") >= since]
+    if to:
+        records = [r for r in records if r.get("timestamp", "") <= to]
     return list(reversed(records))[-limit:]
 
 
