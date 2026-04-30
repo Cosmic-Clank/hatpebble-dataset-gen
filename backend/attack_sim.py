@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import random
 import sys
 import time
 
@@ -202,34 +203,139 @@ def attack_voltage_trend(client: mqtt.Client) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Anomaly-monitor attacks (trigger statistical / ML detection, not just IDS rules)
+# ---------------------------------------------------------------------------
+
+def attack_anomaly_power_surge(client: mqtt.Client) -> None:
+    banner("ATTACK 7 — Power Surge (Anomaly Monitor)")
+    print("  Target  : load1_active_power, load2_active_power, load3_active_power")
+    print("  Method  : Seed 20 normal readings, then inject sustained 8 000 W surge")
+    print("  Expected: critical anomalies on Anomaly Monitor within ~10 s\n")
+    print("  NOTE    : The anomaly engine runs every 5 s and reads from the CSV log.")
+    print("            Anomalies appear on the Anomaly Monitor page, not Alerts.\n")
+    pause("Press Enter to begin seeding normal history…")
+
+    SEED = 20
+    print(f"\n  Publishing {SEED} normal AC readings (~2 300 W) on all three load groups…")
+    for i in range(SEED):
+        power = 2300.0 + (i % 5) * 8
+        for lg in ["load1", "load2", "load3"]:
+            pub(client, f"ems/ac/{lg}", make_ac(active_power=power), label=f"{lg} {i+1}/{SEED}")
+        time.sleep(0.25)
+
+    print("\n  Seeding complete. Injecting 8 000 W surge on all load groups…")
+    SURGE = 15
+    for i in range(SURGE):
+        surge_power = 8000.0 + (i % 3) * 200
+        for lg in ["load1", "load2", "load3"]:
+            pub(client, f"ems/ac/{lg}", make_ac(active_power=surge_power), label=f"SURGE {i+1}/{SURGE}")
+        time.sleep(0.3)
+
+    print("\n  Surge complete. Wait ~10 s for the anomaly engine to process.")
+    print("  Check the Anomaly Monitor page for critical anomalies on active_power signals.")
+
+
+def attack_anomaly_frequency_deviation(client: mqtt.Client) -> None:
+    banner("ATTACK 8 — Frequency Deviation (Anomaly Monitor)")
+    print("  Target  : load1_frequency, load2_frequency, load3_frequency")
+    print("  Method  : Seed normal 50 Hz history, then sustain 44 Hz (grid instability)")
+    print("  Expected: high/critical anomalies on frequency signals\n")
+    pause("Press Enter to begin seeding normal history…")
+
+    SEED = 20
+    print(f"\n  Publishing {SEED} normal readings at 50.0 Hz…")
+    for i in range(SEED):
+        freq = 50.0 + random.uniform(-0.05, 0.05)
+        for lg in ["load1", "load2", "load3"]:
+            pub(client, f"ems/ac/{lg}", make_ac(frequency=round(freq, 3)), label=f"{lg} {i+1}/{SEED}")
+        time.sleep(0.25)
+
+    print("\n  Injecting sustained 44 Hz frequency deviation…")
+    DEVIATE = 15
+    for i in range(DEVIATE):
+        bad_freq = 44.0 + random.uniform(-0.2, 0.2)
+        for lg in ["load1", "load2", "load3"]:
+            pub(client, f"ems/ac/{lg}", make_ac(frequency=round(bad_freq, 3)), label=f"44Hz {i+1}/{DEVIATE}")
+        time.sleep(0.3)
+
+    print("\n  Done. Check the Anomaly Monitor for frequency signal anomalies.")
+
+
+def attack_anomaly_battery_soc(client: mqtt.Client) -> None:
+    banner("ATTACK 9 — Battery SOC Crash (Anomaly Monitor)")
+    print("  Target  : battery_soc, battery_voltage, battery_current")
+    print("  Method  : Seed normal ~85 % SOC readings, then simulate rapid drain to 4 %")
+    print("  Expected: critical anomalies on battery_soc and battery_voltage signals\n")
+    pause("Press Enter to begin seeding normal battery history…")
+
+    SEED = 20
+    print(f"\n  Publishing {SEED} normal battery readings (SOC ~85 %, voltage ~12.8 V)…")
+    for i in range(SEED):
+        soc = 85.0 + random.uniform(-0.5, 0.5)
+        pub(client, "ems/battery",
+            make_battery(soc=round(soc, 2), battery_voltage=12.8, battery_current=-2.8),
+            label=f"{i+1}/{SEED}")
+        time.sleep(0.25)
+
+    print("\n  Simulating catastrophic SOC crash (4 %) and undervoltage (9.8 V)…")
+    CRASH = 15
+    for i in range(CRASH):
+        soc = 4.0 + random.uniform(0, 1.5)
+        voltage = 9.8 + random.uniform(-0.1, 0.1)
+        current = -0.3 + random.uniform(-0.05, 0.05)
+        power = voltage * current
+        pub(client, "ems/battery",
+            make_battery(soc=round(soc, 2), battery_voltage=round(voltage, 3),
+                         battery_current=round(current, 3), battery_power=round(power, 3)),
+            label=f"CRASH {i+1}/{CRASH}")
+        time.sleep(0.3)
+
+    print("\n  Done. Check the Anomaly Monitor for battery signal anomalies.")
+    print("  (The IDS voltage rule may also fire a separate critical alert.)")
+
+
+# ---------------------------------------------------------------------------
 # Menu
 # ---------------------------------------------------------------------------
 
 ATTACKS = [
-    ("MQTT Flood",            "Flood broker with 80 packets in 2 seconds",
+    # ── IDS / Alert rules ──────────────────────────────────────────────────
+    ("MQTT Flood",                  "Flood broker with 80 packets in 2 seconds",
      attack_flood),
-    ("Unknown Topic",         "Publish on unrecognised MQTT topics",
+    ("Unknown Topic",               "Publish on unrecognised MQTT topics",
      attack_unknown_topic),
-    ("Voltage Anomaly",       "Send out-of-range battery and AC voltages",
+    ("Voltage Anomaly",             "Send out-of-range battery and AC voltages",
      attack_voltage_anomaly),
-    ("Malformed Payload",     "Send payloads with missing required fields",
+    ("Malformed Payload",           "Send payloads with missing required fields",
      attack_malformed),
-    ("Power Spike",           "Seed normal history then inject a 12 000 W spike",
+    ("Power Spike",                 "Seed normal history then inject a 12 000 W spike",
      attack_power_spike),
-    ("Voltage Trend",         "22 strictly decreasing battery voltage readings",
+    ("Voltage Trend",               "22 strictly decreasing battery voltage readings",
      attack_voltage_trend),
+    # ── Anomaly Monitor (statistical / ML detection) ───────────────────────
+    ("Power Surge  [ANOMALY]",      "Seed 2 300 W baseline, surge to 8 000 W on all loads",
+     attack_anomaly_power_surge),
+    ("Frequency Deviation [ANOMALY]", "Seed 50 Hz baseline, sustain 44 Hz on all loads",
+     attack_anomaly_frequency_deviation),
+    ("Battery SOC Crash  [ANOMALY]","Seed 85 % SOC baseline, crash to 4 % / 9.8 V",
+     attack_anomaly_battery_soc),
 ]
 
 
 def menu() -> None:
-    print("\n" + "="*55)
-    print("  EMS IDS Attack Simulator")
+    print("\n" + "="*60)
+    print("  EMS Attack Simulator")
     print("  Make sure mock_esp + backend + frontend are running.")
-    print("="*55)
-    print("\n  Choose an attack:\n")
-    for i, (name, desc, _) in enumerate(ATTACKS, 1):
+    print("="*60)
+    print("\n  ── IDS Alerts (trigger immediately) ──")
+    for i, (name, desc, _) in enumerate(ATTACKS[:6], 1):
         print(f"  [{i}] {name}")
-        print(f"       {desc}\n")
+        print(f"       {desc}")
+    print("\n  ── Anomaly Monitor (statistical, ~10 s lag) ──")
+    for i, (name, desc, _) in enumerate(ATTACKS[6:], 7):
+        print(f"  [{i}] {name}")
+        print(f"       {desc}")
+    print()
     print("  [A] Run ALL attacks in sequence")
     print("  [Q] Quit")
 

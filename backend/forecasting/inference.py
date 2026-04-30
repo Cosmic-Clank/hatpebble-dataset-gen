@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import random
+from collections import deque
 
 import pandas as pd
 
@@ -53,6 +54,11 @@ _residual_fh: dict[str, object] = {}
 
 # per-signal accumulated drift offset for fake mode
 _fake_drift: dict[str, float] = {}
+
+# rolling baseline history for fake mode — used to compute mean so real deviations are detectable
+_fake_history: dict[str, deque] = {}
+_FAKE_HISTORY_LEN = 12   # 12 × 5 s = 60 s of baseline
+_FAKE_HISTORY_MIN = 3    # buckets needed before anomaly detection kicks in
 
 
 # ---------------------------------------------------------------------------
@@ -195,27 +201,37 @@ async def _fake_inference_cycle() -> None:
             # Process only the latest bucket to avoid stale floods
             ts: pd.Timestamp = resampled.index[-1]  # type: ignore[assignment]
             actual = float(resampled.iloc[-1])
-            scale = max(abs(actual), 0.1)   # avoid division/scaling issues near zero
+
+            # Rolling baseline — build from recent actuals so real injected deviations
+            # produce genuine residuals (attack values deviate from the baseline mean).
+            hist = _fake_history.setdefault(signal_name, deque(maxlen=_FAKE_HISTORY_LEN))
+
+            if len(hist) >= _FAKE_HISTORY_MIN:
+                baseline = sum(hist) / len(hist)
+            else:
+                baseline = actual   # not enough history yet; no meaningful anomaly
+
+            scale = max(abs(baseline), 0.1)
 
             # 1. Baseline noise
             noise = random.gauss(0, scale * _NOISE_RATIO)
 
-            # 2. Slow drift — each signal has an independent accumulated offset
+            # 2. Slow drift
             prev_drift = _fake_drift.get(signal_name, 0.0)
             drift_step = random.gauss(0, scale * _DRIFT_RATIO * 0.15)
-            new_drift = prev_drift + drift_step
-            # Mean-revert so drift doesn't walk off to infinity
-            new_drift *= 0.92
+            new_drift = (prev_drift + drift_step) * 0.92
             _fake_drift[signal_name] = new_drift
 
-            # 3. Spike — random sharp hit
+            # 3. Occasional random spike for visual interest during normal operation
             spike = 0.0
-            is_spike = random.random() < _SPIKE_PROB
-            if is_spike:
-                direction = random.choice([-1, 1])
-                spike = direction * scale * _SPIKE_RATIO * random.uniform(0.8, 1.4)
+            if random.random() < _SPIKE_PROB:
+                spike = random.choice([-1, 1]) * scale * _SPIKE_RATIO * random.uniform(0.8, 1.4)
 
-            predicted = actual + noise + new_drift + spike
+            predicted = baseline + noise + new_drift + spike
+
+            # Append to history AFTER computing predicted so the injected value
+            # doesn't contaminate its own baseline.
+            hist.append(actual)
 
             residual = actual - predicted
             noise_std = max(scale * _NOISE_RATIO, 0.01)

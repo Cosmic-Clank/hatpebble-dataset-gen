@@ -20,6 +20,7 @@ import pandas as pd
 import aiomqtt
 import ids as ids_engine
 import forecasting.inference as _forecasting
+import automation as _automation
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -256,14 +257,29 @@ async def mqtt_listener():
             await asyncio.sleep(2)
 
 
+async def _fire_relay(load_group: str, action: str) -> None:
+    """Publish a relay command from the automation engine."""
+    if _mqtt_client is None:
+        log.warning("Automation cannot fire relay: MQTT not connected")
+        return
+    cmd = {"relay": action}
+    await _mqtt_client.publish(f"ems/control/{load_group}", json.dumps(cmd))
+    control_state[load_group]["relay"] = action
+    log.info("Automation fired: %s relay → %s", load_group, action)
+
+
 @app.on_event("startup")
 async def startup():
     _load_today_history()
     ids_engine.load_today_alerts()
+    _automation.set_context(
+        fire_relay=_fire_relay,
+        get_latest=lambda: latest,
+    )
     asyncio.create_task(mqtt_listener())
-    print("ITS HERE")
     asyncio.create_task(_forecasting.run_forever())
-    log.info("MQTT listener started")
+    asyncio.create_task(_automation.run_forever())
+    log.info("MQTT listener + automation engine started")
 
 
 @app.on_event("shutdown")
@@ -352,6 +368,65 @@ async def send_control(load_group: str, request: Request):
     control_state[load_group].update(body)
     log.info("Control command sent to %s: %s", topic, body)
     return {"ok": True, "state": control_state[load_group]}
+
+
+# ---------------------------------------------------------------------------
+# Automation rules endpoints
+# ---------------------------------------------------------------------------
+
+class RuleCreate(BaseModel):
+    load_group: str
+    name: str
+    condition_type: str    # time | power_above | power_below
+    condition_value: str   # "HH:MM" for time, numeric string for power
+    action: str            # ON | OFF
+
+class RuleToggle(BaseModel):
+    enabled: bool
+
+
+@app.get("/api/rules")
+async def get_rules(load_group: Optional[str] = Query(None)):
+    return _automation.get_rules(load_group)
+
+
+@app.post("/api/rules", status_code=201)
+async def create_rule(body: RuleCreate):
+    if body.load_group not in LOAD_GROUPS:
+        raise HTTPException(400, detail=f"Unknown load_group: {body.load_group}")
+    if body.condition_type not in _automation.VALID_CONDITION_TYPES:
+        raise HTTPException(400, detail=f"condition_type must be one of {_automation.VALID_CONDITION_TYPES}")
+    if body.action.upper() not in _automation.VALID_ACTIONS:
+        raise HTTPException(400, detail="action must be ON or OFF")
+    if body.condition_type == "time":
+        try:
+            h, m = body.condition_value.split(":")
+            assert 0 <= int(h) <= 23 and 0 <= int(m) <= 59
+        except Exception:
+            raise HTTPException(400, detail="condition_value must be HH:MM for time rules")
+    else:
+        try:
+            float(body.condition_value)
+        except ValueError:
+            raise HTTPException(400, detail="condition_value must be numeric for power rules")
+    return _automation.create_rule(
+        body.load_group, body.name, body.condition_type, body.condition_value, body.action
+    )
+
+
+@app.delete("/api/rules/{rule_id}")
+async def delete_rule(rule_id: str):
+    if not _automation.delete_rule(rule_id):
+        raise HTTPException(404, detail="Rule not found")
+    return {"ok": True}
+
+
+@app.patch("/api/rules/{rule_id}/enabled")
+async def toggle_rule(rule_id: str, body: RuleToggle):
+    rule = _automation.set_rule_enabled(rule_id, body.enabled)
+    if rule is None:
+        raise HTTPException(404, detail="Rule not found")
+    return rule
 
 
 @app.get("/logs")
