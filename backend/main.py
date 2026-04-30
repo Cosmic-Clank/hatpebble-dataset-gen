@@ -243,7 +243,9 @@ async def mqtt_listener():
                     sensor_history = list(
                         history.get(matched_sensor or "", []))
                     triggered = ids_engine.evaluate_all(
-                        topic, payload, sensor_history)
+                        topic, payload, sensor_history,
+                        context={"relay_states": {lg: control_state[lg].get("relay") for lg in control_state}},
+                    )
                     for alert in triggered:
                         asyncio.create_task(_dispatch_alert(alert))
 

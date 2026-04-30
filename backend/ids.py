@@ -132,6 +132,7 @@ class Rule:
         topic: str,
         payload: dict[str, Any],
         history: list[dict[str, Any]],
+        context: dict | None = None,
     ) -> Alert | None:
         return None
 
@@ -168,7 +169,7 @@ class MQTTFloodRule(Rule):
         self._timestamps: dict[str, deque[float]] = {}
         self._alerted: dict[str, bool] = {}
 
-    def evaluate(self, topic, payload, history):
+    def evaluate(self, topic, payload, history, context=None):
         if topic not in self._timestamps:
             self._timestamps[topic] = deque()
             self._alerted[topic] = False
@@ -215,7 +216,7 @@ class UnknownTopicRule(Rule):
     name = "unknown_topic"
     severity = "warning"
 
-    def evaluate(self, topic, payload, history):
+    def evaluate(self, topic, payload, history, context=None):
         if not any(topic.startswith(p) for p in KNOWN_PREFIXES):
             return self._alert(
                 topic,
@@ -242,7 +243,7 @@ class VoltageAnomalyRule(Rule):
     AC_MIN = 200.0
     AC_MAX = 260.0
 
-    def evaluate(self, topic, payload, history):
+    def evaluate(self, topic, payload, history, context=None):
         if topic == "ems/battery":
             v = payload.get("battery_voltage")
             if v is not None and not math.isnan(float(v)):
@@ -256,6 +257,11 @@ class VoltageAnomalyRule(Rule):
                     )
 
         elif topic.startswith("ems/ac/"):
+            # Only check AC voltage when the load group relay is ON
+            load_group = topic.split("/")[-1]
+            relay_states = (context or {}).get("relay_states", {})
+            if relay_states.get(load_group) != "ON":
+                return None
             v = payload.get("ac_voltage")
             if v is not None and not math.isnan(float(v)):
                 v = float(v)
@@ -263,8 +269,8 @@ class VoltageAnomalyRule(Rule):
                     return self._alert(
                         topic,
                         f"AC voltage {v:.1f} V outside safe range "
-                        f"[{self.AC_MIN}, {self.AC_MAX}] V",
-                        {"voltage": v},
+                        f"[{self.AC_MIN}, {self.AC_MAX}] V on {load_group}",
+                        {"voltage": v, "load_group": load_group},
                     )
         return None
 
@@ -286,7 +292,7 @@ class MalformedPayloadRule(Rule):
     name = "malformed_payload"
     severity = "warning"
 
-    def evaluate(self, topic, payload, history):
+    def evaluate(self, topic, payload, history, context=None):
         required: set[str] | None = None
 
         if topic in REQUIRED_FIELDS:
@@ -323,7 +329,7 @@ class PowerSpikeRule(Rule):
         self.window = window
         self.min_samples = min_samples
 
-    def evaluate(self, topic, payload, history):
+    def evaluate(self, topic, payload, history, context=None):
         if not topic.startswith("ems/ac/"):
             return None
 
@@ -373,7 +379,7 @@ class VoltageTrendRule(Rule):
     def __init__(self, window: int = 20):
         self.window = window
 
-    def evaluate(self, topic, payload, history):
+    def evaluate(self, topic, payload, history, context=None):
         if topic != "ems/battery":
             return None
 
@@ -421,12 +427,13 @@ def evaluate_all(
     topic: str,
     payload: dict[str, Any],
     history: list[dict[str, Any]],
+    context: dict | None = None,
 ) -> list[Alert]:
     """Run all rules. Append triggered alerts to the global store, log them, and return them."""
     triggered: list[Alert] = []
     for rule in RULES:
         try:
-            alert = rule.evaluate(topic, payload, history)
+            alert = rule.evaluate(topic, payload, history, context)
             if alert:
                 alerts.append(alert)
                 _log_alert(alert)
