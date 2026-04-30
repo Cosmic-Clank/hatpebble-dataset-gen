@@ -3,10 +3,19 @@ Rule-based load group automation engine.
 Evaluates user-defined rules every 10 seconds and fires relay control
 commands via MQTT when conditions are met.
 
-Rule types:
-  - time         : fire once per day when clock matches HH:MM
-  - power_above  : fire (with cooldown) when active_power > threshold
-  - power_below  : fire (with cooldown) when active_power < threshold
+Rule types (time):
+  - time               : fire once per day when clock matches HH:MM
+
+Rule types (AC load — reads from latest[load_group]):
+  - power_above/below   : active_power (W)
+  - voltage_above/below : ac_voltage (V)
+  - current_above/below : ac_current (A)
+  - frequency_above/below : frequency (Hz)
+  - pf_above/below      : power_factor
+
+Rule types (battery — reads from latest["battery"]):
+  - soc_above/below         : soc (%)
+  - bat_voltage_above/below : battery_voltage (V)
 """
 from __future__ import annotations
 
@@ -25,8 +34,36 @@ RULES_FILE = Path(__file__).resolve().parent / "automation_rules.json"
 EVAL_INTERVAL   = 10   # seconds between evaluation passes
 POWER_COOLDOWN  = 60   # seconds before a power rule can re-trigger for the same load
 
-VALID_CONDITION_TYPES = {"time", "power_above", "power_below"}
-VALID_ACTIONS         = {"ON", "OFF"}
+VALID_CONDITION_TYPES = {
+    "time",
+    "power_above", "power_below",
+    "voltage_above", "voltage_below",
+    "current_above", "current_below",
+    "frequency_above", "frequency_below",
+    "pf_above", "pf_below",
+    "soc_above", "soc_below",
+    "bat_voltage_above", "bat_voltage_below",
+}
+VALID_ACTIONS = {"ON", "OFF"}
+
+# Maps threshold condition_type → (sensor_source, field_name, direction)
+# sensor_source "load" reads from latest[load_group]; "battery" reads from latest["battery"]
+_THRESHOLD_MAP: dict[str, tuple[str, str, str]] = {
+    "power_above":       ("load",    "active_power",    "above"),
+    "power_below":       ("load",    "active_power",    "below"),
+    "voltage_above":     ("load",    "ac_voltage",      "above"),
+    "voltage_below":     ("load",    "ac_voltage",      "below"),
+    "current_above":     ("load",    "ac_current",      "above"),
+    "current_below":     ("load",    "ac_current",      "below"),
+    "frequency_above":   ("load",    "frequency",       "above"),
+    "frequency_below":   ("load",    "frequency",       "below"),
+    "pf_above":          ("load",    "power_factor",    "above"),
+    "pf_below":          ("load",    "power_factor",    "below"),
+    "soc_above":         ("battery", "soc",             "above"),
+    "soc_below":         ("battery", "soc",             "below"),
+    "bat_voltage_above": ("battery", "battery_voltage", "above"),
+    "bat_voltage_below": ("battery", "battery_voltage", "below"),
+}
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -164,19 +201,20 @@ def _evaluate_once() -> None:
                     should_fire = True
                     _time_last_fired[rid] = now_date_hhmm
 
-            elif ctype in ("power_above", "power_below"):
+            elif ctype in _THRESHOLD_MAP:
                 if now_mono < _power_cooldown_until.get(rid, 0.0):
                     continue
-                reading = latest.get(lg)
+                source, field, direction = _THRESHOLD_MAP[ctype]
+                reading = latest.get("battery" if source == "battery" else lg)
                 if reading is None:
                     continue
-                power = reading.get("active_power")
-                if power is None:
+                value = reading.get(field)
+                if value is None:
                     continue
                 threshold = float(cval)
-                if ctype == "power_above" and float(power) > threshold:
+                if direction == "above" and float(value) > threshold:
                     should_fire = True
-                elif ctype == "power_below" and float(power) < threshold:
+                elif direction == "below" and float(value) < threshold:
                     should_fire = True
                 if should_fire:
                     _power_cooldown_until[rid] = now_mono + POWER_COOLDOWN
