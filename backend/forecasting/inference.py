@@ -34,9 +34,13 @@ log = logging.getLogger("forecasting.inference")
 
 FAKE_FORECAST = True
 
-# Noise / drift / anomaly tuning
-_NOISE_RATIO    = 0.004  # baseline Gaussian noise as fraction of signal value
-_ANOMALY_Z_FAKE = 3.5   # z-threshold used for fake anomaly records
+# Noise / anomaly tuning
+# _NOISE_RATIO sets the expected std of normal bucket-to-bucket change as a
+# fraction of the signal value.  2 % means a 2300 W signal has a noise_std of
+# ~46 W, so normal ±100 W jitter never exceeds 3.5 σ but an 8 000 W surge
+# scores ~124 σ and fires immediately.
+_NOISE_RATIO    = 0.02   # 2 % of signal — wide enough to ignore natural jitter
+_ANOMALY_Z_FAKE = 3.5    # z-score threshold for anomaly detection
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -49,10 +53,10 @@ RESIDUAL_HEADER = "timestamp,predicted,actual,residual,z_score,is_anomaly\n"
 # open file handles for residuals CSVs
 _residual_fh: dict[str, object] = {}
 
-# rolling baseline history for fake mode — used to compute mean so real deviations are detectable
+# 1-step lag history — only the previous actual value is needed
 _fake_history: dict[str, deque] = {}
-_FAKE_HISTORY_LEN = 12   # 12 × 5 s = 60 s of baseline
-_FAKE_HISTORY_MIN = 3    # buckets needed before anomaly detection kicks in
+_FAKE_HISTORY_LEN = 2    # only need previous bucket
+_FAKE_HISTORY_MIN = 1    # need 1 prior value before detection kicks in
 
 
 # ---------------------------------------------------------------------------
@@ -193,22 +197,22 @@ async def _fake_inference_cycle() -> None:
             ts: pd.Timestamp = resampled.index[-1]  # type: ignore[assignment]
             actual = float(resampled.iloc[-1])
 
-            # Rolling baseline — mean of recent actuals so real deviations are detectable
+            # 1-step lag — predicted = previous actual + tiny noise.
+            # At rest the two chart lines are nearly identical; only genuine
+            # step-changes (attacks) produce a visible gap and trigger anomalies.
             hist = _fake_history.setdefault(signal_name, deque(maxlen=_FAKE_HISTORY_LEN))
 
             if len(hist) >= _FAKE_HISTORY_MIN:
-                baseline = sum(hist) / len(hist)
+                prev = hist[-1]
             else:
-                baseline = actual   # not enough history yet
+                prev = actual   # first bucket: no prior value
 
-            scale = max(abs(baseline), 0.1)
-
-            # Tiny noise so the chart shows two distinguishable lines at rest
+            scale = max(abs(prev), 0.1)
             noise = random.gauss(0, scale * _NOISE_RATIO)
-            predicted = baseline + noise
+            predicted = prev + noise
 
-            # Append to history AFTER computing predicted so the injected value
-            # doesn't contaminate its own baseline.
+            # Append AFTER computing predicted so the current value doesn't
+            # corrupt its own prediction.
             hist.append(actual)
 
             residual = actual - predicted

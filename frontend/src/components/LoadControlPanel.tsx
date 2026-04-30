@@ -15,10 +15,6 @@ interface ACPayload {
 
 interface ControlState {
   relay: "ON" | "OFF";
-  threshold: string;
-  on_time: string;
-  off_time: string;
-  priority: "Critical" | "High" | "Normal" | "Low";
 }
 
 type ConditionType =
@@ -78,13 +74,7 @@ interface Props {
 export default function LoadControlPanel({ loadGroup, label }: Props) {
   const { data, connected } = useWebSocket<ACPayload>(`${WS_URL}/ws/ac/${loadGroup}`);
 
-  const [state, setState] = useState<ControlState>({
-    relay: "OFF",
-    threshold: "",
-    on_time: "",
-    off_time: "",
-    priority: "Normal",
-  });
+  const [state, setState] = useState<ControlState>({ relay: "OFF" });
   const [sending, setSending] = useState(false);
 
   // ── Rules state ──────────────────────────────────────────────────────────
@@ -98,37 +88,15 @@ export default function LoadControlPanel({ loadGroup, label }: Props) {
     action: "OFF",
   });
 
-  // Initial fetch — populates all fields including text inputs
+  // Poll relay state
   useEffect(() => {
-    fetch(`${API_URL}/control/${loadGroup}`)
-      .then((r) => r.json())
-      .then((data) =>
-        setState((prev) => ({
-          ...prev,
-          relay:     data.relay     ?? prev.relay,
-          threshold: data.threshold != null ? String(data.threshold) : "",
-          on_time:   data.on_time   ?? "",
-          off_time:  data.off_time  ?? "",
-          priority:  data.priority  ?? prev.priority,
-        }))
-      )
-      .catch(() => {});
-  }, [loadGroup]);
-
-  // Recurring poll — only syncs instant-action fields (relay, priority).
-  useEffect(() => {
-    const id = setInterval(() => {
+    const sync = () =>
       fetch(`${API_URL}/control/${loadGroup}`)
         .then((r) => r.json())
-        .then((data) =>
-          setState((prev) => ({
-            ...prev,
-            relay:    data.relay    ?? prev.relay,
-            priority: data.priority ?? prev.priority,
-          }))
-        )
+        .then((data) => setState((prev) => ({ ...prev, relay: data.relay ?? prev.relay })))
         .catch(() => {});
-    }, 1000);
+    sync();
+    const id = setInterval(sync, 1000);
     return () => clearInterval(id);
   }, [loadGroup]);
 
@@ -236,118 +204,29 @@ export default function LoadControlPanel({ loadGroup, label }: Props) {
         </div>
       </div>
 
-      {/* Control cards */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-
-        {/* Relay toggle */}
-        <ControlCard title="Relay Switch" description="Toggle the load circuit on or off.">
-          <div className="flex items-center justify-between">
-            <div>
-              <span className="text-sm text-foreground">Circuit Power</span>
-              <p className="text-[10px] text-muted mt-0.5">
-                {relayOn ? "Circuit is energised" : "Circuit is open"}
-              </p>
-            </div>
-            <button
-              onClick={() => sendControl({ relay: relayOn ? "OFF" : "ON" })}
-              className={`relative w-11 h-6 rounded-full transition-colors duration-200 focus:outline-none ${
-                relayOn ? "bg-accent-green" : "bg-muted/30"
-              }`}
-            >
-              <span
-                className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${
-                  relayOn ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
+      {/* Relay toggle */}
+      <ControlCard title="Relay Switch" description="Toggle the load circuit on or off.">
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-sm text-foreground">Circuit Power</span>
+            <p className="text-[10px] text-muted mt-0.5">
+              {relayOn ? "Circuit is energised" : "Circuit is open"}
+            </p>
           </div>
-        </ControlCard>
-
-        {/* Power threshold */}
-        <ControlCard
-          title="Power Threshold"
-          description="Auto-trip the relay if power exceeds this limit. Leave blank to disable."
-        >
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const val = state.threshold.trim();
-              sendControl({ threshold: val === "" ? undefined : Number(val) });
-            }}
-            className="flex items-center gap-2"
+          <button
+            onClick={() => sendControl({ relay: relayOn ? "OFF" : "ON" })}
+            className={`relative w-11 h-6 rounded-full transition-colors duration-200 focus:outline-none ${
+              relayOn ? "bg-accent-green" : "bg-muted/30"
+            }`}
           >
-            <input
-              type="number"
-              min={0}
-              placeholder="e.g. 3000"
-              value={state.threshold}
-              onChange={(e) => setState((p) => ({ ...p, threshold: e.target.value }))}
-              className="flex-1 px-3 py-2 bg-background border border-card-border rounded-lg text-sm focus:outline-none focus:border-accent-amber"
+            <span
+              className={`absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${
+                relayOn ? "translate-x-5" : "translate-x-0"
+              }`}
             />
-            <span className="text-xs text-muted">W</span>
-            <button
-              type="submit"
-              className="px-3 py-2 text-xs font-semibold rounded-lg bg-accent-amber/15 text-accent-amber hover:bg-accent-amber/25 transition-colors"
-            >
-              Set
-            </button>
-          </form>
-        </ControlCard>
-
-        {/* Scheduled control */}
-        <ControlCard
-          title="Scheduled On/Off"
-          description="Set a daily schedule for automatic load switching."
-        >
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-[10px] text-muted uppercase tracking-wider">On Time</label>
-              <input
-                type="time"
-                value={state.on_time}
-                onChange={(e) => setState((p) => ({ ...p, on_time: e.target.value }))}
-                onBlur={() => sendControl({ on_time: state.on_time || undefined })}
-                className="w-full px-3 py-2 bg-background border border-card-border rounded-lg text-sm focus:outline-none focus:border-accent-amber"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] text-muted uppercase tracking-wider">Off Time</label>
-              <input
-                type="time"
-                value={state.off_time}
-                onChange={(e) => setState((p) => ({ ...p, off_time: e.target.value }))}
-                onBlur={() => sendControl({ off_time: state.off_time || undefined })}
-                className="w-full px-3 py-2 bg-background border border-card-border rounded-lg text-sm focus:outline-none focus:border-accent-amber"
-              />
-            </div>
-          </div>
-        </ControlCard>
-
-        {/* Priority level */}
-        <ControlCard
-          title="Load Priority"
-          description="Set the priority for load shedding. Lower priority loads are shed first."
-        >
-          <div className="flex gap-2">
-            {(["Critical", "High", "Normal", "Low"] as const).map((level) => {
-              const active = state.priority === level;
-              return (
-                <button
-                  key={level}
-                  onClick={() => sendControl({ priority: level })}
-                  className={`flex-1 px-2 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-                    active
-                      ? "border-accent-amber bg-accent-amber/15 text-accent-amber"
-                      : "border-card-border text-muted hover:border-accent-amber/40 hover:text-foreground"
-                  }`}
-                >
-                  {level}
-                </button>
-              );
-            })}
-          </div>
-        </ControlCard>
-      </div>
+          </button>
+        </div>
+      </ControlCard>
 
       {/* ── Automation Rules ────────────────────────────────────────────── */}
       <div className="bg-card border border-card-border rounded-xl p-5 flex flex-col gap-4">
