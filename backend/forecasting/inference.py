@@ -14,6 +14,7 @@ import json
 import logging
 import random
 from collections import deque
+from typing import Any
 
 import pandas as pd
 
@@ -35,12 +36,13 @@ log = logging.getLogger("forecasting.inference")
 FAKE_FORECAST = True
 
 # Noise / anomaly tuning
-# _NOISE_RATIO sets the expected std of normal bucket-to-bucket change as a
-# fraction of the signal value.  2 % means a 2300 W signal has a noise_std of
-# ~46 W, so normal ±100 W jitter never exceeds 3.5 σ but an 8 000 W surge
-# scores ~124 σ and fires immediately.
-_NOISE_RATIO    = 0.02   # 2 % of signal — wide enough to ignore natural jitter
-_ANOMALY_Z_FAKE = 3.5    # z-score threshold for anomaly detection
+# _NOISE_RATIO is the expected std of normal bucket-to-bucket change as a
+# fraction of the signal value.
+#   5 % on a 2300 W signal → noise_std ≈ 115 W
+#   threshold at 5 σ       → fires only when a single bucket changes by > 575 W
+# That ignores natural sensor jitter while catching attack-level surges cleanly.
+_NOISE_RATIO    = 0.05   # 5 % of signal value
+_ANOMALY_Z_FAKE = 5.0    # z-score threshold — raise to reduce false positives
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -51,7 +53,7 @@ _last_processed_ts: dict[str, pd.Timestamp | None] = {}
 RESIDUAL_HEADER = "timestamp,predicted,actual,residual,z_score,is_anomaly\n"
 
 # open file handles for residuals CSVs
-_residual_fh: dict[str, object] = {}
+_residual_fh: dict[str, Any] = {}
 
 # 1-step lag history — only the previous actual value is needed
 _fake_history: dict[str, deque] = {}
