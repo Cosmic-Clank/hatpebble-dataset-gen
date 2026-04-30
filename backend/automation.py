@@ -31,7 +31,7 @@ from typing import Any, Callable, Awaitable
 log = logging.getLogger("ems.automation")
 
 RULES_FILE = Path(__file__).resolve().parent / "automation_rules.json"
-EVAL_INTERVAL   = 10   # seconds between evaluation passes
+EVAL_INTERVAL   = 5    # seconds between evaluation passes
 POWER_COOLDOWN  = 60   # seconds before a power rule can re-trigger for the same load
 
 VALID_CONDITION_TYPES = {

@@ -13,7 +13,9 @@ export type Page =
   | "controls-load2"
   | "controls-load3"
   | "alerts"
-  | "anomalies";
+  | "anomalies"
+  | "reports"
+  | "ai-insights";
 
 interface Props {
   active: Page;
@@ -103,6 +105,36 @@ function IconWave() {
   );
 }
 
+function IconFlow() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <circle cx="5" cy="12" r="2.5" />
+      <circle cx="19" cy="6" r="2.5" />
+      <circle cx="19" cy="18" r="2.5" />
+      <path d="M7.5 12h4l3-5.5" />
+      <path d="M11.5 12l3 5.5" />
+    </svg>
+  );
+}
+
+function IconTable() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M3 9h18M3 15h18M9 3v18" />
+    </svg>
+  );
+}
+
+function IconSparkle() {
+  return (
+    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={1.8}>
+      <path d="M12 3v2m0 14v2M3 12h2m14 0h2M5.636 5.636l1.414 1.414M16.95 16.95l1.414 1.414M5.636 18.364l1.414-1.414M16.95 7.05l1.414-1.414" />
+      <circle cx="12" cy="12" r="3" />
+    </svg>
+  );
+}
+
 export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
   const { user, role, signOut } = useAuth();
 
@@ -116,8 +148,8 @@ export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
     {
       title: "Monitoring",
       items: [
-        { id: "battery", label: "Battery", icon: <IconBattery /> },
-        { id: "load1", label: "Load Group 1", icon: <IconBolt /> },
+        { id: "battery", label: "Battery",      icon: <IconBattery /> },
+        { id: "load1",   label: "Load Group 1", icon: <IconBolt /> },
         { id: "load2", label: "Load Group 2", icon: <IconBolt /> },
         { id: "load3", label: "Load Group 3", icon: <IconBolt /> },
       ],
@@ -138,6 +170,13 @@ export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
         { id: "anomalies", label: "Anomaly Monitor",  icon: <IconWave /> },
       ],
     },
+    {
+      title: "Analytics",
+      items: [
+        { id: "reports",     label: "Reports",     icon: <IconTable /> },
+        { id: "ai-insights", label: "AI Insights", icon: <IconSparkle /> },
+      ],
+    },
   ];
 
   function activeHex(page: Page): string {
@@ -146,6 +185,8 @@ export default function Sidebar({ active, onNavigate, alertBadge = 0 }: Props) {
     if (page.startsWith("controls")) return "#f59e0b";
     if (page === "alerts") return "#ef4444";
     if (page === "anomalies") return "#8b5cf6";
+    if (page === "reports") return "#06b6d4";
+    if (page === "ai-insights") return "#a855f7";
     return "#3b82f6";
   }
 

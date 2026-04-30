@@ -35,11 +35,8 @@ log = logging.getLogger("forecasting.inference")
 FAKE_FORECAST = True
 
 # Noise / drift / anomaly tuning
-_NOISE_RATIO   = 0.004   # baseline Gaussian noise as fraction of signal value
-_DRIFT_RATIO   = 0.008   # max slow drift as fraction of signal value
-_SPIKE_PROB    = 0.04    # probability of a spike per bucket (~1 every 25 buckets)
-_SPIKE_RATIO   = 0.06    # spike magnitude as fraction of signal value (triggers anomaly)
-_ANOMALY_Z_FAKE = 3.5    # z-threshold used for fake anomaly records
+_NOISE_RATIO    = 0.004  # baseline Gaussian noise as fraction of signal value
+_ANOMALY_Z_FAKE = 3.5   # z-threshold used for fake anomaly records
 
 # ---------------------------------------------------------------------------
 # Module-level state
@@ -51,9 +48,6 @@ RESIDUAL_HEADER = "timestamp,predicted,actual,residual,z_score,is_anomaly\n"
 
 # open file handles for residuals CSVs
 _residual_fh: dict[str, object] = {}
-
-# per-signal accumulated drift offset for fake mode
-_fake_drift: dict[str, float] = {}
 
 # rolling baseline history for fake mode — used to compute mean so real deviations are detectable
 _fake_history: dict[str, deque] = {}
@@ -176,12 +170,9 @@ async def _inference_cycle() -> None:
 
 async def _fake_inference_cycle() -> None:
     """
-    Fake mode — produces varied, realistic-looking residuals without real models.
-
-    Per bucket:
-      1. Baseline noise  — small Gaussian jitter always present
-      2. Slow drift      — per-signal accumulated offset that wanders up/down
-      3. Occasional spike — random sharp deviation that triggers a real anomaly record
+    Fake mode — pure anomaly detection against a rolling baseline.
+    Predicted = rolling mean of recent actuals + tiny Gaussian noise.
+    Anomalies only fire when real MQTT data deviates from that baseline.
     """
     for signal_name in SIGNALS:
         cfg = SIGNALS[signal_name]
@@ -202,32 +193,19 @@ async def _fake_inference_cycle() -> None:
             ts: pd.Timestamp = resampled.index[-1]  # type: ignore[assignment]
             actual = float(resampled.iloc[-1])
 
-            # Rolling baseline — build from recent actuals so real injected deviations
-            # produce genuine residuals (attack values deviate from the baseline mean).
+            # Rolling baseline — mean of recent actuals so real deviations are detectable
             hist = _fake_history.setdefault(signal_name, deque(maxlen=_FAKE_HISTORY_LEN))
 
             if len(hist) >= _FAKE_HISTORY_MIN:
                 baseline = sum(hist) / len(hist)
             else:
-                baseline = actual   # not enough history yet; no meaningful anomaly
+                baseline = actual   # not enough history yet
 
             scale = max(abs(baseline), 0.1)
 
-            # 1. Baseline noise
+            # Tiny noise so the chart shows two distinguishable lines at rest
             noise = random.gauss(0, scale * _NOISE_RATIO)
-
-            # 2. Slow drift
-            prev_drift = _fake_drift.get(signal_name, 0.0)
-            drift_step = random.gauss(0, scale * _DRIFT_RATIO * 0.15)
-            new_drift = (prev_drift + drift_step) * 0.92
-            _fake_drift[signal_name] = new_drift
-
-            # 3. Occasional random spike for visual interest during normal operation
-            spike = 0.0
-            if random.random() < _SPIKE_PROB:
-                spike = random.choice([-1, 1]) * scale * _SPIKE_RATIO * random.uniform(0.8, 1.4)
-
-            predicted = baseline + noise + new_drift + spike
+            predicted = baseline + noise
 
             # Append to history AFTER computing predicted so the injected value
             # doesn't contaminate its own baseline.

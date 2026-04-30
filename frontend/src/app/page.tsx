@@ -8,6 +8,8 @@ import ACMeterDashboard from "@/components/ACMeterDashboard";
 import LoadControlPanel from "@/components/LoadControlPanel";
 import AlertsFeed from "@/components/AlertsFeed";
 import AnomalyMonitor from "@/components/AnomalyMonitor";
+import ReportsPage from "@/components/ReportsPage";
+import AIInsightsPage from "@/components/AIInsightsPage";
 import { useAuth } from "@/lib/auth-context";
 
 export default function Home() {
@@ -58,6 +60,8 @@ export default function Home() {
             <AlertsFeed onUnseenChange={(n) => { if (page !== "alerts") setAlertBadge(n); }} />
           )}
           {page === "anomalies" && <AnomalyMonitor />}
+          {page === "reports" && <ReportsPage />}
+          {page === "ai-insights" && <AIInsightsPage />}
         </main>
 
         {/* Footer */}
@@ -81,6 +85,8 @@ function PageTitle({ page }: { page: Page }) {
     "controls-load3": { label: "Controls — Load Group 3", sub: "Load management" },
     alerts:     { label: "Security Alerts",   sub: "IDS engine" },
     anomalies:  { label: "Anomaly Monitor",   sub: "SARIMA forecasting" },
+    reports:       { label: "Reports",           sub: "Historical data & analytics" },
+    "ai-insights": { label: "AI Insights",      sub: "Natural language data queries" },
   };
   const t = titles[page];
   return (

@@ -3,6 +3,7 @@
 import React from "react";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import ConnectionBadge from "./ConnectionBadge";
+import PowerFlowDiagram from "./PowerFlowDiagram";
 
 interface BatteryPayload {
   battery_voltage: number;
@@ -135,6 +136,7 @@ export default function OverviewDashboard() {
       {/* Load groups grid */}
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         {LOADS.map((load, i) => {
+
           const ws = loads[i];
           return (
             <div key={load.id} className="bg-card border border-card-border rounded-xl p-5">
@@ -170,6 +172,36 @@ export default function OverviewDashboard() {
             </div>
           );
         })}
+      </div>
+
+      {/* Power Flow Diagram */}
+      <div className="bg-card border border-card-border rounded-xl p-5">
+        <div className="flex items-center justify-between mb-4">
+          <div>
+            <h2 className="text-sm font-semibold">Power Flow</h2>
+            <p className="text-[10px] text-muted mt-0.5">Live energy topology · drag nodes to rearrange</p>
+          </div>
+          <div className="flex gap-4 items-center flex-wrap">
+            {[
+              { label: "Solar/Grid", color: "#f59e0b" },
+              { label: "Battery",    color: "#22c55e" },
+              { label: "Load 1",     color: "#3b82f6" },
+              { label: "Load 2",     color: "#8b5cf6" },
+              { label: "Load 3",     color: "#06b6d4" },
+            ].map(({ label, color }) => (
+              <div key={label} className="flex items-center gap-1.5">
+                <div className="w-5 h-0.5 rounded" style={{ backgroundColor: color }} />
+                <span className="text-[10px] text-muted">{label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <PowerFlowDiagram
+          batteryData={battery.data}
+          load1Data={load1.data}
+          load2Data={load2.data}
+          load3Data={load3.data}
+        />
       </div>
     </div>
   );
